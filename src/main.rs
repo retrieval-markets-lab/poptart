@@ -9,13 +9,17 @@ use futures::{
 };
 use iroh_bitswap::{Block, Store};
 use iroh_car::CarReader;
-use libp2p::{identity::Keypair, multiaddr::Protocol, swarm::SwarmEvent, Multiaddr, Swarm};
+use libp2p::{
+    identify, identify::Event as IdentifyEvent, identity::Keypair, multiaddr::Protocol,
+    swarm::SwarmEvent, Multiaddr, Swarm,
+};
 use log::{debug, info, warn};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::BufReader;
 use tokio::sync::RwLock;
+
 mod behaviour;
 mod transport;
 
@@ -58,6 +62,7 @@ async fn main() -> Result<(), anyhow::Error> {
     info!("starting poptart 🍭 ...");
     let opt = Opt::parse();
     let is_relay_client = if let CliArgument::Relay = opt.argument {
+        info!("you are a hole-punching 🧃 relay. thank you for your service 🫡.");
         false
     } else {
         info!("we'll be punching 🧃 through NATs today.");
@@ -71,7 +76,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let (transport, relay_client) = build_transport(&keys, is_relay_client).await;
 
     let behaviour =
-        PopTartBehaviour::new(&peer_id, store.clone(), is_relay_client, relay_client).await;
+        PopTartBehaviour::new(&keys, store.clone(), is_relay_client, relay_client).await;
 
     let swarm = Swarm::with_tokio_executor(transport, behaviour, peer_id);
 
@@ -85,7 +90,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let mut client = Client::new(cmd_sender);
 
     client
-        .start("/ip4/0.0.0.0/tcp/0".parse()?)
+        .start("/ip4/0.0.0.0/tcp/2001".parse()?)
         .await
         .expect("swarm to start listening");
 
@@ -293,6 +298,29 @@ impl EventLoop {
             Command::ConnectRelay { relay } => {
                 if let Err(err) = self.swarm.dial(relay) {
                     warn!("failed to dial relay: {err:?}");
+                }
+                let mut learned_observed_addr = false;
+                let mut told_relay_observed_addr = false;
+
+                loop {
+                    match self.swarm.next().await.unwrap() {
+                        SwarmEvent::Behaviour(Event::Identify(IdentifyEvent::Sent { .. })) => {
+                            info!("told relay its public address 🙊");
+                            told_relay_observed_addr = true;
+                        }
+                        SwarmEvent::Behaviour(Event::Identify(IdentifyEvent::Received {
+                            info: identify::Info { observed_addr, .. },
+                            ..
+                        })) => {
+                            info!("relay told us our public address: {:?}", observed_addr);
+                            learned_observed_addr = true;
+                        }
+                        event => debug!("{:?}", event),
+                    }
+
+                    if learned_observed_addr && told_relay_observed_addr {
+                        break;
+                    }
                 }
             }
         }
