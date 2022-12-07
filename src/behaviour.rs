@@ -8,6 +8,7 @@ use libp2p::{
     dcutr, relay,
     swarm::{behaviour::toggle::Toggle, NetworkBehaviour},
 };
+use log::info;
 
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "Event", event_process = false)]
@@ -38,6 +39,7 @@ impl<S: Store> PopTartBehaviour<S> {
         };
 
         let relay = if !is_relay_client {
+            info!("you are a hole-punching 🧃 relay. thank you for your service 🫡.");
             let config = relay::v2::relay::Config::default();
             let r = Relay::new(*peer_id, config);
             Some(r)

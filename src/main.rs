@@ -10,12 +10,12 @@ use futures::{
 use iroh_bitswap::{Block, Store};
 use iroh_car::CarReader;
 use libp2p::{identity::Keypair, multiaddr::Protocol, swarm::SwarmEvent, Multiaddr, Swarm};
+use log::{debug, info, warn};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::BufReader;
 use tokio::sync::RwLock;
-
 mod behaviour;
 mod transport;
 
@@ -54,13 +54,20 @@ impl Store for MemStore {
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
+    colog::init();
+    info!("starting poptart 🍭 ...");
     let opt = Opt::parse();
-    let is_relay_client = true;
+    let is_relay_client = if let CliArgument::Relay = opt.argument {
+        false
+    } else {
+        info!("we'll be punching 🧃 through NATs today.");
+        true
+    };
     let keys = Keypair::generate_ed25519();
     let peer_id = keys.public().to_peer_id();
 
     let store = MemStore::default();
-
+    info!("setting up transport 🏎️ ...");
     let (transport, relay_client) = build_transport(&keys, is_relay_client).await;
 
     let behaviour =
@@ -83,35 +90,42 @@ async fn main() -> Result<(), anyhow::Error> {
         .expect("swarm to start listening");
 
     match opt.argument {
-        CliArgument::Provide { path } => loop {
-            let file = File::open(&path).await?;
-            let buf_reader = BufReader::new(file);
+        CliArgument::Provide { relay, path } => {
+            client.connect_to_relay(relay).await?;
+            loop {
+                let file = File::open(&path).await?;
+                let buf_reader = BufReader::new(file);
 
-            let car_reader = CarReader::new(buf_reader).await?;
-            let stream = car_reader.stream().boxed();
+                let car_reader = CarReader::new(buf_reader).await?;
+                let stream = car_reader.stream().boxed();
 
-            let store_clone = store.clone();
-            stream
-                .try_for_each(move |(cid, data)| {
-                    let store = store_clone.clone();
-                    async move {
-                        let bytes = Bytes::from(data);
-                        store
-                            .store
-                            .write()
-                            .await
-                            .insert(cid, Block::new(bytes.into(), cid));
-                        Ok(())
-                    }
-                })
-                .await?;
-            match evt_receiver.next().await {
-                _ => (),
+                let store_clone = store.clone();
+                stream
+                    .try_for_each(move |(cid, data)| {
+                        let store = store_clone.clone();
+                        async move {
+                            let bytes = Bytes::from(data);
+                            store
+                                .store
+                                .write()
+                                .await
+                                .insert(cid, Block::new(bytes.into(), cid));
+                            Ok(())
+                        }
+                    })
+                    .await?;
+                match evt_receiver.next().await {
+                    _ => (),
+                }
             }
-        },
-        CliArgument::Resolve { peers, root } => {
+        }
+        CliArgument::Resolve { peers, root, relay } => {
+            client.connect_to_relay(relay).await?;
             client.resolve(peers, root).await?;
         }
+        CliArgument::Relay => match evt_receiver.next().await {
+            _ => (),
+        },
     };
 
     Ok(())
@@ -126,20 +140,28 @@ struct Opt {
 
 #[derive(Debug, Parser)]
 enum CliArgument {
+    Relay,
     Provide {
         #[clap(long)]
         path: PathBuf,
+        #[clap(long)]
+        relay: Multiaddr,
     },
     Resolve {
         #[clap(long)]
         root: Cid,
         #[clap(long)]
         peers: Vec<Multiaddr>,
+        #[clap(long)]
+        relay: Multiaddr,
     },
 }
 
 #[derive(Debug)]
 enum Command {
+    ConnectRelay {
+        relay: Multiaddr,
+    },
     Start {
         addr: Multiaddr,
         sender: oneshot::Sender<anyhow::Result<()>>,
@@ -184,6 +206,13 @@ impl Client {
             .expect("Command receiver not to be dropped");
         receiver.await.expect("Sender not to be dropped")
     }
+    pub async fn connect_to_relay(&mut self, relay: Multiaddr) -> anyhow::Result<()> {
+        self.sender
+            .send(Command::ConnectRelay { relay })
+            .await
+            .expect("Command receiver not to be dropped");
+        Ok(())
+    }
 }
 
 struct EventLoop {
@@ -217,6 +246,15 @@ impl EventLoop {
                                 address.with(Protocol::P2p(local_peer_id.into()))
                             );
                         }
+                        SwarmEvent::Behaviour(Event::Dcutr(event)) => {
+                            debug!("dcutr event: {:?}", event);
+                        }
+                        SwarmEvent::Behaviour(Event::Relay(event)) => {
+                            debug!("relay event: {:?}", event)
+                        }
+                        SwarmEvent::Behaviour(Event::RelayClient(event)) => {
+                            debug!("relay client event: {:?}", event)
+                        }
                         _ => {}
                     }
                 }
@@ -243,7 +281,7 @@ impl EventLoop {
             } => {
                 for addr in providers {
                     if let Err(err) = self.swarm.dial(addr) {
-                        println!("failed to dial peer: {err:?}");
+                        warn!("failed to dial peer: {err:?}");
                     }
                 }
                 let behaviour = self.swarm.behaviour().clone();
@@ -251,6 +289,11 @@ impl EventLoop {
                     Ok(_) => sender.send(Ok(())),
                     Err(err) => sender.send(Err(err.into())),
                 };
+            }
+            Command::ConnectRelay { relay } => {
+                if let Err(err) = self.swarm.dial(relay) {
+                    warn!("failed to dial relay: {err:?}");
+                }
             }
         }
     }
