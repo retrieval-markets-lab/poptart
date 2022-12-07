@@ -7,24 +7,20 @@ use futures::{
     channel::{mpsc, oneshot},
     prelude::*,
 };
-use iroh_bitswap::{Bitswap, Block, Config, Store};
+use iroh_bitswap::{Block, Store};
 use iroh_car::CarReader;
-use libp2p::{
-    core::{self, muxing::StreamMuxerBox, transport::OrTransport},
-    dns,
-    identity::Keypair,
-    multiaddr::Protocol,
-    noise, quic,
-    swarm::{derive_prelude::EitherOutput, SwarmEvent},
-    tcp, websocket,
-    yamux::{self, WindowUpdateMode},
-    Multiaddr, PeerId, Swarm, Transport,
-};
+use libp2p::{identity::Keypair, multiaddr::Protocol, swarm::SwarmEvent, Multiaddr, Swarm};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::BufReader;
 use tokio::sync::RwLock;
+
+mod behaviour;
+mod transport;
+
+pub use behaviour::*;
+pub use transport::*;
 
 #[derive(Debug, Clone, Default)]
 struct MemStore {
@@ -59,54 +55,18 @@ impl Store for MemStore {
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     let opt = Opt::parse();
-
+    let is_relay_client = true;
     let keys = Keypair::generate_ed25519();
-
-    let tcp_config = tcp::Config::default().port_reuse(true);
-    let tcp_transport = tcp::tokio::Transport::new(tcp_config.clone());
-
-    let ws_tcp = websocket::WsConfig::new(tcp::tokio::Transport::new(tcp_config));
-    let tcp_ws_transport = tcp_transport.or_transport(ws_tcp);
-
-    let quic_config = quic::Config::new(&keys);
-    let quic_transport = quic::tokio::Transport::new(quic_config);
-
-    let auth_config = {
-        let dh_keys = noise::Keypair::<noise::X25519Spec>::new().into_authentic(&keys)?;
-        noise::NoiseConfig::xx(dh_keys).into_authenticated()
-    };
-
-    let mut yamux_config = yamux::YamuxConfig::default();
-    yamux_config.set_max_buffer_size(16 * 1024 * 1024);
-    yamux_config.set_receive_window_size(16 * 1024 * 1024);
-    yamux_config.set_window_update_mode(WindowUpdateMode::on_receive());
-
-    let tcp_ws_transport = tcp_ws_transport
-        .upgrade(core::upgrade::Version::V1Lazy)
-        .authenticate(auth_config)
-        .multiplex(yamux_config)
-        .boxed();
-
-    let transport = OrTransport::new(quic_transport, tcp_ws_transport)
-        .map(|o, _| match o {
-            EitherOutput::First((peer_id, muxer)) => (peer_id, StreamMuxerBox::new(muxer)),
-            EitherOutput::Second((peer_id, muxer)) => (peer_id, StreamMuxerBox::new(muxer)),
-        })
-        .boxed();
-
-    let dns_cfg = dns::ResolverConfig::cloudflare();
-    let dns_opts = dns::ResolverOpts::default();
-    let transport = dns::TokioDnsConfig::custom(transport, dns_cfg, dns_opts)
-        .unwrap()
-        .boxed();
-
     let peer_id = keys.public().to_peer_id();
 
     let store = MemStore::default();
 
-    let bs = Bitswap::new(peer_id, store.clone(), Config::default()).await;
+    let (transport, relay_client) = build_transport(&keys, is_relay_client).await;
 
-    let swarm = Swarm::with_tokio_executor(transport, bs, peer_id);
+    let behaviour =
+        PopTartBehaviour::new(&peer_id, store.clone(), is_relay_client, relay_client).await;
+
+    let swarm = Swarm::with_tokio_executor(transport, behaviour, peer_id);
 
     let (cmd_sender, cmd_receiver) = mpsc::channel(0);
     let (evt_sender, mut evt_receiver) = mpsc::channel(0);
@@ -226,22 +186,15 @@ impl Client {
     }
 }
 
-#[derive(Debug)]
-pub enum Event {
-    Provide { key: Cid },
-    FindProviders { key: Cid },
-    Ping { peer: PeerId },
-}
-
 struct EventLoop {
-    swarm: Swarm<Bitswap<MemStore>>,
+    swarm: Swarm<PopTartBehaviour<MemStore>>,
     command_receiver: mpsc::Receiver<Command>,
     event_sender: mpsc::Sender<Event>,
 }
 
 impl EventLoop {
     fn new(
-        swarm: Swarm<Bitswap<MemStore>>,
+        swarm: Swarm<PopTartBehaviour<MemStore>>,
         command_receiver: mpsc::Receiver<Command>,
         event_sender: mpsc::Sender<Event>,
     ) -> Self {
@@ -293,8 +246,8 @@ impl EventLoop {
                         println!("failed to dial peer: {err:?}");
                     }
                 }
-                let bitswap = self.swarm.behaviour().clone();
-                let _ = match bitswap.client().get_block(&root).await {
+                let behaviour = self.swarm.behaviour().clone();
+                let _ = match behaviour.bitswap.client().get_block(&root).await {
                     Ok(_) => sender.send(Ok(())),
                     Err(err) => sender.send(Err(err.into())),
                 };

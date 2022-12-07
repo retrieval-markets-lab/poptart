@@ -2092,12 +2092,14 @@ dependencies = [
  "getrandom 0.2.8",
  "instant",
  "libp2p-core",
+ "libp2p-dcutr",
  "libp2p-dns",
  "libp2p-mdns",
  "libp2p-metrics",
  "libp2p-noise",
  "libp2p-ping",
  "libp2p-quic",
+ "libp2p-relay",
  "libp2p-swarm",
  "libp2p-tcp",
  "libp2p-webrtc",
@@ -2144,6 +2146,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "libp2p-dcutr"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b047ae2856cb46adaed6344634d4bb93b9a917fc300358cd33284cdb4c8132c6"
+dependencies = [
+ "asynchronous-codec",
+ "bytes",
+ "either",
+ "futures",
+ "futures-timer",
+ "instant",
+ "libp2p-core",
+ "libp2p-swarm",
+ "log",
+ "prost",
+ "prost-build",
+ "prost-codec",
+ "thiserror",
+ "void",
+]
+
+[[package]]
 name = "libp2p-dns"
 version = "0.38.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2184,7 +2208,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5ad8a64f29da86005c86a4d2728b8a0719e9b192f4092b609fd8790acb9dec55"
 dependencies = [
  "libp2p-core",
+ "libp2p-dcutr",
  "libp2p-ping",
+ "libp2p-relay",
  "libp2p-swarm",
  "prometheus-client",
 ]
@@ -2250,6 +2276,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "libp2p-relay"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dffb67f6b6cce19cfeab9b10b77fbff756a66a1c143cba7deb8c3f964fadcb59"
+dependencies = [
+ "asynchronous-codec",
+ "bytes",
+ "either",
+ "futures",
+ "futures-timer",
+ "instant",
+ "libp2p-core",
+ "libp2p-swarm",
+ "log",
+ "pin-project",
+ "prost",
+ "prost-build",
+ "prost-codec",
+ "rand 0.8.5",
+ "smallvec",
+ "static_assertions",
+ "thiserror",
+ "void",
+]
+
+[[package]]
 name = "libp2p-swarm"
 version = "0.41.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2261,6 +2313,7 @@ dependencies = [
  "futures-timer",
  "instant",
  "libp2p-core",
+ "libp2p-swarm-derive",
  "log",
  "pin-project",
  "rand 0.8.5",
@@ -2268,6 +2321,17 @@ dependencies = [
  "thiserror",
  "tokio",
  "void",
+]
+
+[[package]]
+name = "libp2p-swarm-derive"
+version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d527d5827582abd44a6d80c07ff8b50b4ee238a8979e05998474179e79dc400"
+dependencies = [
+ "heck",
+ "quote",
+ "syn",
 ]
 
 [[package]]
