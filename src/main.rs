@@ -109,6 +109,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 let buf_reader = BufReader::new(file);
 
                 let car_reader = CarReader::new(buf_reader).await?;
+                let root = car_reader.header().roots()[0];
                 let stream = car_reader.stream().boxed();
 
                 let store_clone = store.clone();
@@ -122,6 +123,7 @@ async fn main() -> Result<(), anyhow::Error> {
                         }
                     })
                     .await?;
+                info!("imported car file with root {:?} into store...", root);
                 match evt_receiver.next().await {
                     _ => (),
                 }
