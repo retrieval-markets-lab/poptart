@@ -21,12 +21,12 @@ pub async fn build_transport(
     let ws_tcp = websocket::WsConfig::new(tcp::tokio::Transport::new(tcp_config));
     let tcp_ws_transport = tcp_transport.or_transport(ws_tcp);
 
-    let quic_config = quic::Config::new(&keys);
+    let quic_config = quic::Config::new(keys);
     let quic_transport = quic::tokio::Transport::new(quic_config);
 
     let auth_config = {
         let dh_keys = noise::Keypair::<noise::X25519Spec>::new()
-            .into_authentic(&keys)
+            .into_authentic(keys)
             .expect("Noise key generation failed");
         noise::NoiseConfig::xx(dh_keys).into_authenticated()
     };

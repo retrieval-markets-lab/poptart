@@ -114,7 +114,7 @@ async fn main() -> Result<(), anyhow::Error> {
                                 .store
                                 .write()
                                 .await
-                                .insert(cid, Block::new(bytes.into(), cid));
+                                .insert(cid, Block::new(bytes, cid));
                             Ok(())
                         }
                     })
@@ -289,10 +289,10 @@ impl EventLoop {
                         warn!("failed to dial peer: {err:?}");
                     }
                 }
-                let behaviour = self.swarm.behaviour().clone();
+                let behaviour = self.swarm.behaviour();
                 let _ = match behaviour.bitswap.client().get_block(&root).await {
                     Ok(_) => sender.send(Ok(())),
-                    Err(err) => sender.send(Err(err.into())),
+                    Err(err) => sender.send(Err(err)),
                 };
             }
             Command::ConnectRelay { relay } => {
