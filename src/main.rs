@@ -246,7 +246,7 @@ impl EventLoop {
                     match event {
                         SwarmEvent::NewListenAddr { address, .. } => {
                             let local_peer_id = *self.swarm.local_peer_id();
-                            println!(
+                            info!(
                                 "==> node listening on {:?}",
                                 address.with(Protocol::P2p(local_peer_id.into()))
                             );
