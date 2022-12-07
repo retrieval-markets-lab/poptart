@@ -19,3 +19,10 @@ ahash = "0.8.0"
 bytes = "1.1.0"
 log = "0.4.17"
 colog = "1.1.0"
+rocksdb = "0.19.0"
+smallvec = { version = "1.10.0", features = ["write"] }
+rkyv = { version = "0.7.37", features = ["validation"] }
+bytecheck = "0.6.7"
+libipld = "0.15.0"
+dirs-next = "2.0.0"
+tempfile = "3.3.0"

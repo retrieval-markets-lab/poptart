@@ -1,59 +1,54 @@
-use ahash::AHashMap;
-use async_trait::async_trait;
-use bytes::Bytes;
 use cid::Cid;
 use clap::Parser;
 use futures::{
     channel::{mpsc, oneshot},
     prelude::*,
 };
-use iroh_bitswap::{Block, Store};
 use iroh_car::CarReader;
+use libipld::prelude::Codec as _;
+use libipld::{Ipld, IpldCodec};
 use libp2p::{
     identify, identify::Event as IdentifyEvent, identity::Keypair, multiaddr::Protocol,
     swarm::SwarmEvent, Multiaddr, Swarm,
 };
 use log::{debug, info, warn};
+use std::collections::BTreeSet;
+use std::env;
 use std::path::PathBuf;
-use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::BufReader;
-use tokio::sync::RwLock;
 
 mod behaviour;
+mod store;
 mod transport;
 
-pub use behaviour::*;
-pub use transport::*;
+use behaviour::*;
+use store::RockStore;
+use transport::*;
 
-#[derive(Debug, Clone, Default)]
-struct MemStore {
-    store: Arc<RwLock<AHashMap<Cid, Block>>>,
+fn parse_links(cid: &Cid, bytes: &[u8]) -> anyhow::Result<Vec<Cid>> {
+    let mut cids = BTreeSet::new();
+    let codec = match cid.codec() {
+        0x71 => IpldCodec::DagCbor,
+        0x70 => IpldCodec::DagPb,
+        0x0129 => IpldCodec::DagJson,
+        0x55 => IpldCodec::Raw,
+        codec => anyhow::bail!("unsupported codec {:?}", codec),
+    };
+    codec.references::<Ipld, _>(bytes, &mut cids)?;
+    let links = cids.into_iter().collect();
+    Ok(links)
 }
 
-#[async_trait]
-impl Store for MemStore {
-    async fn get_size(&self, cid: &Cid) -> anyhow::Result<usize> {
-        self.store
-            .read()
-            .await
-            .get(cid)
-            .map(|block| block.data().len())
-            .ok_or_else(|| anyhow::format_err!("missing"))
+const POPTART_DIR: &str = ".poptart";
+fn poptart_data_root() -> anyhow::Result<PathBuf> {
+    if let Some(val) = env::var_os("POPTART_DATA_DIR") {
+        return Ok(PathBuf::from(val));
     }
-
-    async fn get(&self, cid: &Cid) -> anyhow::Result<Block> {
-        self.store
-            .read()
-            .await
-            .get(cid)
-            .cloned()
-            .ok_or_else(|| anyhow::format_err!("missing"))
-    }
-
-    async fn has(&self, cid: &Cid) -> anyhow::Result<bool> {
-        Ok(self.store.read().await.contains_key(cid))
-    }
+    let path = dirs_next::data_dir().ok_or_else(|| {
+        anyhow::format_err!("operating environment provides no directory for application data")
+    })?;
+    Ok(path.join(POPTART_DIR))
 }
 
 #[tokio::main]
@@ -71,7 +66,19 @@ async fn main() -> Result<(), anyhow::Error> {
     let keys = Keypair::generate_ed25519();
     let peer_id = keys.public().to_peer_id();
 
-    let store = MemStore::default();
+    let store_path = if opt.tempstore {
+        tempfile::tempdir()?.path().into()
+    } else {
+        poptart_data_root()?
+    };
+    let store = if store_path.exists() {
+        info!("found existing blockstore, opening...");
+        RockStore::open(store_path).await?
+    } else {
+        info!("creating new blockstore at path {:?}...", store_path);
+        RockStore::create(store_path).await?
+    };
+
     info!("setting up transport 🏎️ ...");
     let (transport, relay_client) = build_transport(&keys, is_relay_client).await;
 
@@ -109,12 +116,8 @@ async fn main() -> Result<(), anyhow::Error> {
                     .try_for_each(move |(cid, data)| {
                         let store = store_clone.clone();
                         async move {
-                            let bytes = Bytes::from(data);
-                            store
-                                .store
-                                .write()
-                                .await
-                                .insert(cid, Block::new(bytes, cid));
+                            let links = parse_links(&cid, &data).unwrap_or_default();
+                            store.put(cid, &data, links)?;
                             Ok(())
                         }
                     })
@@ -139,6 +142,8 @@ async fn main() -> Result<(), anyhow::Error> {
 #[derive(Debug, Parser)]
 #[clap(name = "poptart")]
 struct Opt {
+    #[clap(long)]
+    tempstore: bool,
     #[clap(subcommand)]
     argument: CliArgument,
 }
@@ -221,14 +226,14 @@ impl Client {
 }
 
 struct EventLoop {
-    swarm: Swarm<PopTartBehaviour<MemStore>>,
+    swarm: Swarm<PopTartBehaviour<RockStore>>,
     command_receiver: mpsc::Receiver<Command>,
     event_sender: mpsc::Sender<Event>,
 }
 
 impl EventLoop {
     fn new(
-        swarm: Swarm<PopTartBehaviour<MemStore>>,
+        swarm: Swarm<PopTartBehaviour<RockStore>>,
         command_receiver: mpsc::Receiver<Command>,
         event_sender: mpsc::Sender<Event>,
     ) -> Self {
