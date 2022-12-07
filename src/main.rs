@@ -25,6 +25,7 @@ use tokio::fs::File;
 use tokio::io::BufReader;
 
 mod behaviour;
+mod metrics;
 mod store;
 mod transport;
 

@@ -26,3 +26,5 @@ bytecheck = "0.6.7"
 libipld = "0.15.0"
 dirs-next = "2.0.0"
 tempfile = "3.3.0"
+influxdb = { version = "0.5.2", default-features = false, features = ["derive", "use-serde", "curl-client"] }
+chrono = "0.4.23"
