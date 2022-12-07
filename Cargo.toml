@@ -29,8 +29,11 @@ tempfile = "3.3.0"
 tork = { version = "0.1", path = "./tork" }
 tracing = "0.1.34"
 tracing-subscriber = { version = "0.3.11", features = ["env-filter"] }
+influxdb = { version = "0.5.2", default-features = false, features = ["derive", "use-serde", "curl-client"] }
+chrono = "0.4.23"
 
 [workspace]
 members = [
   "tork",
 ]
+
