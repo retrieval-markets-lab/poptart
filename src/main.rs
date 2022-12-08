@@ -1,10 +1,12 @@
 use ahash::HashMap;
+use bytes::Bytes;
 use cid::Cid;
 use clap::Parser;
 use futures::{
     channel::{mpsc, oneshot},
     prelude::*,
 };
+use iroh_bitswap::Block;
 use iroh_car::CarReader;
 use libipld::prelude::Codec as _;
 use libipld::{Ipld, IpldCodec};
@@ -103,13 +105,15 @@ async fn main() -> Result<(), anyhow::Error> {
     let mut client = Client::new(cmd_sender);
 
     client
-        .start("/ip4/0.0.0.0/tcp/2001".parse()?)
+        .start("/ip4/0.0.0.0/tcp/0".parse()?)
         .await
         .expect("swarm to start listening");
 
     match opt.argument {
         CliArgument::Provide { relay, path } => {
-            client.dial(relay).await?;
+            if let Some(addr) = relay {
+                client.dial(addr).await?;
+            }
 
             let file = File::open(&path).await?;
             let buf_reader = BufReader::new(file);
@@ -122,9 +126,13 @@ async fn main() -> Result<(), anyhow::Error> {
             stream
                 .try_for_each(move |(cid, data)| {
                     let store = store_clone.clone();
+                    let mut client = client.clone();
                     async move {
-                        let links = parse_links(&cid, &data).unwrap_or_default();
-                        store.put(cid, &data, links)?;
+                        let data = Bytes::from(data);
+                        let blk = Block::new(data, cid);
+                        let links = parse_links(&cid, blk.data()).unwrap_or_default();
+                        store.put(cid, blk.data(), links)?;
+                        client.notify_new_blocks_bitswap(vec![blk]).await?;
                         Ok(())
                     }
                 })
@@ -169,7 +177,7 @@ enum CliArgument {
         #[clap(long)]
         path: PathBuf,
         #[clap(long)]
-        relay: Multiaddr,
+        relay: Option<Multiaddr>,
     },
     Resolve {
         #[clap(long)]
@@ -192,6 +200,9 @@ enum Command {
     Resolve {
         root: Cid,
         sender: oneshot::Sender<anyhow::Result<()>>,
+    },
+    NotifyNewBlocks {
+        blocks: Vec<Block>,
     },
 }
 
@@ -234,6 +245,15 @@ impl Client {
             .await
             .expect("Command receiver not to be dropped");
         receiver.await.expect("Sender not to be dropped")
+    }
+
+    /// Notify bitswap about new blocks. Don't really wait for it to complete.
+    pub async fn notify_new_blocks_bitswap(&mut self, blocks: Vec<Block>) -> anyhow::Result<()> {
+        self.sender
+            .send(Command::NotifyNewBlocks { blocks })
+            .await
+            .expect("Command receiver not to be dropped");
+        Ok(())
     }
 }
 
@@ -362,6 +382,15 @@ impl EventLoop {
                     let _ =
                         sender.send(Err(anyhow::format_err!("multiaddr was not a p2p address")));
                 }
+            }
+            Command::NotifyNewBlocks { blocks } => {
+                let client = self.swarm.behaviour().bitswap.client().clone();
+                // avoid blocking other events
+                tokio::task::spawn(async move {
+                    if let Err(err) = client.notify_new_blocks(&blocks).await {
+                        warn!("failed to notify bitswap about blocks: {:?}", err);
+                    }
+                });
             }
             // Currently all we do here is follow every link we can find and store the blocks.
             Command::Resolve { root, sender } => {
