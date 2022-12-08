@@ -3,17 +3,33 @@ use influxdb::Client;
 use influxdb::InfluxDbWriteable;
 use log::warn;
 
-#[derive(InfluxDbWriteable)]
-struct Measurement {
+#[derive(InfluxDbWriteable, Default, Clone)]
+pub struct TransferMeasurement {
     protocol: String,
-    peer: String,
-    cid: String,
-    transfer_time: i32,
+    pub cid: String,
+    pub transfer_time: i64,
+    pub data_size: i64,
     time: DateTime<Utc>,
 }
 
-struct Metrics {
-    measurements: Vec<Measurement>,
+impl TransferMeasurement {
+    pub fn new(protocol: String, cid: String) -> Self {
+        TransferMeasurement {
+            protocol,
+            cid,
+            time: Utc::now(),
+            ..Default::default()
+        }
+    }
+    pub fn increment(&mut self, block_size: i64) {
+        self.transfer_time = (Utc::now() - self.time).num_milliseconds();
+        self.data_size += block_size;
+    }
+}
+
+#[derive(Clone)]
+pub struct Metrics {
+    measurements: Vec<TransferMeasurement>,
     client: Client,
 }
 
@@ -25,7 +41,7 @@ impl Metrics {
             measurements: vec![],
         }
     }
-    pub fn add(&mut self, measurement: Measurement) {
+    pub fn add(&mut self, measurement: TransferMeasurement) {
         self.measurements.push(measurement);
     }
 

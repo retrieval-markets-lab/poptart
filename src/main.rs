@@ -30,6 +30,7 @@ mod store;
 mod transport;
 
 use behaviour::*;
+use metrics::*;
 use store::RockStore;
 use transport::*;
 
@@ -97,7 +98,15 @@ async fn main() -> Result<(), anyhow::Error> {
     let (cmd_sender, cmd_receiver) = mpsc::channel(0);
     let (evt_sender, mut evt_receiver) = mpsc::channel(0);
 
-    let ev_loop = EventLoop::new(swarm, store.clone(), cmd_receiver, evt_sender);
+    let metrics = Metrics::new("http://localhost:8086", "test");
+
+    let ev_loop = EventLoop::new(
+        swarm,
+        store.clone(),
+        cmd_receiver,
+        evt_sender,
+        Some(metrics),
+    );
 
     tokio::task::spawn(ev_loop.run());
 
@@ -244,6 +253,7 @@ struct EventLoop {
     command_receiver: mpsc::Receiver<Command>,
     event_sender: mpsc::Sender<Event>,
     dial_requests: HashMap<PeerId, oneshot::Sender<anyhow::Result<()>>>,
+    metrics: Option<Metrics>,
 }
 
 impl EventLoop {
@@ -252,6 +262,7 @@ impl EventLoop {
         store: RockStore,
         command_receiver: mpsc::Receiver<Command>,
         event_sender: mpsc::Sender<Event>,
+        metrics: Option<Metrics>,
     ) -> Self {
         Self {
             swarm,
@@ -259,6 +270,7 @@ impl EventLoop {
             command_receiver,
             event_sender,
             dial_requests: Default::default(),
+            metrics,
         }
     }
 
@@ -373,6 +385,9 @@ impl EventLoop {
                 let mut stack: SmallVec<[vec::IntoIter<Cid>; 8]> = SmallVec::new();
                 stack.push(vec![root].into_iter());
 
+                let mut measurement =
+                    TransferMeasurement::new("bitswap".to_string(), root.to_string());
+
                 while !stack.is_empty() {
                     let next = stack.last_mut().expect("stack should be non-empty").next();
 
@@ -384,12 +399,19 @@ impl EventLoop {
                             if let Ok(blk) = session.get_block(&cid).await {
                                 if let Ok(links) = parse_links(blk.cid(), blk.data()) {
                                     stack.push(links.clone().into_iter());
-                                    let _ = self.store.put(cid, blk.data(), links);
+                                    let data = blk.data();
+                                    let _ = self.store.put(cid, data, links);
+                                    measurement.increment(data.len() as i64);
                                 }
                             };
                         }
                     }
                 }
+                info!(
+                    "resolving {} ({} bytes) took {} micros",
+                    measurement.cid, measurement.data_size, measurement.transfer_time
+                );
+
                 let _ = session.stop().await;
                 let _ = sender.send(Ok(()));
             }
