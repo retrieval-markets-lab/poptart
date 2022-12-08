@@ -1,3 +1,4 @@
+use ahash::HashMap;
 use cid::Cid;
 use clap::Parser;
 use futures::{
@@ -8,13 +9,18 @@ use iroh_car::CarReader;
 use libipld::prelude::Codec as _;
 use libipld::{Ipld, IpldCodec};
 use libp2p::{
-    identify, identify::Event as IdentifyEvent, identity::Keypair, multiaddr::Protocol,
-    swarm::SwarmEvent, Multiaddr, Swarm,
+    identify,
+    identify::Event as IdentifyEvent,
+    identity::Keypair,
+    multiaddr::Protocol,
+    swarm::{ConnectionHandler, IntoConnectionHandler, NetworkBehaviour, SwarmEvent},
+    Multiaddr, PeerId, Swarm,
 };
 use log::{debug, info, warn};
+use smallvec::SmallVec;
 use std::collections::BTreeSet;
-use std::env;
 use std::path::PathBuf;
+use std::{env, vec};
 use tokio::fs::File;
 use tokio::io::BufReader;
 
@@ -90,7 +96,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let (cmd_sender, cmd_receiver) = mpsc::channel(0);
     let (evt_sender, mut evt_receiver) = mpsc::channel(0);
 
-    let ev_loop = EventLoop::new(swarm, cmd_receiver, evt_sender);
+    let ev_loop = EventLoop::new(swarm, store.clone(), cmd_receiver, evt_sender);
 
     tokio::task::spawn(ev_loop.run());
 
@@ -103,36 +109,44 @@ async fn main() -> Result<(), anyhow::Error> {
 
     match opt.argument {
         CliArgument::Provide { relay, path } => {
-            client.connect_to_relay(relay).await?;
+            client.dial(relay).await?;
+
+            let file = File::open(&path).await?;
+            let buf_reader = BufReader::new(file);
+
+            let car_reader = CarReader::new(buf_reader).await?;
+            let root = car_reader.header().roots()[0];
+            let stream = car_reader.stream().boxed();
+
+            let store_clone = store.clone();
+            stream
+                .try_for_each(move |(cid, data)| {
+                    let store = store_clone.clone();
+                    async move {
+                        let links = parse_links(&cid, &data).unwrap_or_default();
+                        store.put(cid, &data, links)?;
+                        Ok(())
+                    }
+                })
+                .await?;
+            info!("imported car file with root {:?} into store...", root);
+
             loop {
-                let file = File::open(&path).await?;
-                let buf_reader = BufReader::new(file);
-
-                let car_reader = CarReader::new(buf_reader).await?;
-                let stream = car_reader.stream().boxed();
-
-                let store_clone = store.clone();
-                stream
-                    .try_for_each(move |(cid, data)| {
-                        let store = store_clone.clone();
-                        async move {
-                            let links = parse_links(&cid, &data).unwrap_or_default();
-                            store.put(cid, &data, links)?;
-                            Ok(())
-                        }
-                    })
-                    .await?;
                 match evt_receiver.next().await {
                     _ => (),
                 }
             }
         }
-        CliArgument::Resolve { peers, root, relay } => {
-            client.connect_to_relay(relay).await?;
-            client.resolve(peers, root).await?;
+        CliArgument::Resolve { peers, root } => {
+            for peer in peers {
+                client.dial(peer).await?;
+            }
+            client.resolve(root).await?;
         }
-        CliArgument::Relay => match evt_receiver.next().await {
-            _ => (),
+        CliArgument::Relay => loop {
+            match evt_receiver.next().await {
+                _ => (),
+            }
         },
     };
 
@@ -162,22 +176,20 @@ enum CliArgument {
         root: Cid,
         #[clap(long)]
         peers: Vec<Multiaddr>,
-        #[clap(long)]
-        relay: Multiaddr,
     },
 }
 
 #[derive(Debug)]
 enum Command {
-    ConnectRelay {
-        relay: Multiaddr,
+    Dial {
+        maddr: Multiaddr,
+        sender: oneshot::Sender<anyhow::Result<()>>,
     },
     Start {
         addr: Multiaddr,
         sender: oneshot::Sender<anyhow::Result<()>>,
     },
     Resolve {
-        providers: Vec<Multiaddr>,
         root: Cid,
         sender: oneshot::Sender<anyhow::Result<()>>,
     },
@@ -203,75 +215,125 @@ impl Client {
         receiver.await.expect("Sender not to be dropped")
     }
 
-    /// Opens a connection with some peers and resolves IPFS content via Bitswap
-    pub async fn resolve(&mut self, addrs: Vec<Multiaddr>, root: Cid) -> anyhow::Result<()> {
+    /// Resolves IPFS content via Bitswap
+    pub async fn resolve(&mut self, root: Cid) -> anyhow::Result<()> {
         let (sender, receiver) = oneshot::channel();
         self.sender
-            .send(Command::Resolve {
-                providers: addrs,
-                root,
-                sender,
-            })
+            .send(Command::Resolve { root, sender })
             .await
             .expect("Command receiver not to be dropped");
         receiver.await.expect("Sender not to be dropped")
     }
-    pub async fn connect_to_relay(&mut self, relay: Multiaddr) -> anyhow::Result<()> {
+
+    /// Tries to open a connection with the peer at the given address. Must be a p2p address,
+    /// so a multiaddrs containing a peer ID. The receiver will return the error if the dial fails.
+    pub async fn dial(&mut self, maddr: Multiaddr) -> anyhow::Result<()> {
+        let (sender, receiver) = oneshot::channel();
         self.sender
-            .send(Command::ConnectRelay { relay })
+            .send(Command::Dial { maddr, sender })
             .await
             .expect("Command receiver not to be dropped");
-        Ok(())
+        receiver.await.expect("Sender not to be dropped")
     }
 }
 
 struct EventLoop {
-    swarm: Swarm<PopTartBehaviour<RockStore>>,
+    swarm: Swarm<PopTartBehaviour>,
+    store: RockStore,
     command_receiver: mpsc::Receiver<Command>,
     event_sender: mpsc::Sender<Event>,
+    dial_requests: HashMap<PeerId, oneshot::Sender<anyhow::Result<()>>>,
 }
 
 impl EventLoop {
     fn new(
-        swarm: Swarm<PopTartBehaviour<RockStore>>,
+        swarm: Swarm<PopTartBehaviour>,
+        store: RockStore,
         command_receiver: mpsc::Receiver<Command>,
         event_sender: mpsc::Sender<Event>,
     ) -> Self {
         Self {
             swarm,
+            store,
             command_receiver,
             event_sender,
+            dial_requests: Default::default(),
         }
     }
 
     pub async fn run(mut self) {
         loop {
             tokio::select! {
-                event = self.swarm.select_next_some() => {
-                    match event {
-                        SwarmEvent::NewListenAddr { address, .. } => {
-                            let local_peer_id = *self.swarm.local_peer_id();
-                            info!(
-                                "==> node listening on {:?}",
-                                address.with(Protocol::P2p(local_peer_id.into()))
-                            );
-                        }
-                        SwarmEvent::Behaviour(Event::Dcutr(event)) => {
-                            debug!("dcutr event: {:?}", event);
-                        }
-                        SwarmEvent::Behaviour(Event::Relay(event)) => {
-                            debug!("relay event: {:?}", event)
-                        }
-                        SwarmEvent::Behaviour(Event::RelayClient(event)) => {
-                            debug!("relay client event: {:?}", event)
-                        }
-                        _ => {}
-                    }
-                }
+                event = self.swarm.select_next_some() => self.handle_swarm_event(event),
                 command = self.command_receiver.next() => match command {
                     Some(c) => self.handle_command(c).await,
                     None => return,
                 },
+            }
+        }
+    }
+
+    fn handle_swarm_event(
+        &mut self,
+        event: SwarmEvent<
+            <PopTartBehaviour as NetworkBehaviour>::OutEvent,
+            <<<PopTartBehaviour as NetworkBehaviour>::ConnectionHandler as IntoConnectionHandler>::Handler as ConnectionHandler>::Error>,
+    ) {
+        match event {
+            SwarmEvent::NewListenAddr { address, .. } => {
+                let local_peer_id = *self.swarm.local_peer_id();
+                info!(
+                    "==> node listening on {:?}",
+                    address.with(Protocol::P2p(local_peer_id.into()))
+                );
+            }
+            SwarmEvent::OutgoingConnectionError { peer_id, error } => {
+                if let Some(peer_id) = peer_id {
+                    self.dial_requests
+                        .remove(&peer_id)
+                        .and_then(|sender| sender.send(Err(error.into())).ok());
+                }
+            }
+            SwarmEvent::Behaviour(event) => self.handle_behaviour_event(event),
+            _ => {}
+        }
+    }
+
+    fn handle_behaviour_event(&mut self, event: Event) {
+        match event {
+            Event::Dcutr(event) => {
+                debug!("dcutr event: {:?}", event);
+            }
+            Event::Relay(event) => {
+                debug!("relay event: {:?}", event)
+            }
+            Event::RelayClient(event) => {
+                debug!("relay client event: {:?}", event)
+            }
+            Event::Identify(e) => {
+                if let IdentifyEvent::Received {
+                    peer_id,
+                    info:
+                        identify::Info {
+                            observed_addr,
+                            protocols,
+                            ..
+                        },
+                } = e
+                {
+                    info!("peer told us our public address: {:?}", observed_addr);
+                    self.swarm
+                        .behaviour()
+                        .bitswap
+                        .on_identify(&peer_id, &protocols);
+                    self.dial_requests
+                        .remove(&peer_id)
+                        .and_then(|sender| sender.send(Ok(())).ok());
+                }
+            }
+            Event::Bitswap(e) => {
+                debug!("bitswap event: {:?}", e);
+                let _ = self.event_sender.send(Event::Bitswap(e));
             }
         }
     }
@@ -284,49 +346,51 @@ impl EventLoop {
                     Err(e) => sender.send(Err(e.into())),
                 };
             }
-            Command::Resolve {
-                providers,
-                root,
-                sender,
-            } => {
-                for addr in providers {
-                    if let Err(err) = self.swarm.dial(addr) {
+            Command::Dial { maddr, sender } => {
+                if let Some(Protocol::P2p(hash)) = maddr.iter().last() {
+                    let pid = PeerId::from_multihash(hash).expect("invalid multihash");
+                    self.dial_requests.insert(pid, sender);
+                    if let Err(err) = self.swarm.dial(maddr) {
                         warn!("failed to dial peer: {err:?}");
+                        let _ = self
+                            .dial_requests
+                            .remove(&pid)
+                            .expect("to have a peer id")
+                            .send(Err(err.into()));
                     }
+                } else {
+                    let _ =
+                        sender.send(Err(anyhow::format_err!("multiaddr was not a p2p address")));
                 }
-                let behaviour = self.swarm.behaviour();
-                let _ = match behaviour.bitswap.client().get_block(&root).await {
-                    Ok(_) => sender.send(Ok(())),
-                    Err(err) => sender.send(Err(err)),
-                };
             }
-            Command::ConnectRelay { relay } => {
-                if let Err(err) = self.swarm.dial(relay) {
-                    warn!("failed to dial relay: {err:?}");
-                }
-                let mut learned_observed_addr = false;
-                let mut told_relay_observed_addr = false;
+            // Currently all we do here is follow every link we can find and store the blocks.
+            Command::Resolve { root, sender } => {
+                let behaviour = self.swarm.behaviour();
 
-                loop {
-                    match self.swarm.next().await.unwrap() {
-                        SwarmEvent::Behaviour(Event::Identify(IdentifyEvent::Sent { .. })) => {
-                            info!("told relay its public address 🙊");
-                            told_relay_observed_addr = true;
-                        }
-                        SwarmEvent::Behaviour(Event::Identify(IdentifyEvent::Received {
-                            info: identify::Info { observed_addr, .. },
-                            ..
-                        })) => {
-                            info!("relay told us our public address: {:?}", observed_addr);
-                            learned_observed_addr = true;
-                        }
-                        event => debug!("{:?}", event),
-                    }
+                let session = behaviour.bitswap.client().new_session().await;
 
-                    if learned_observed_addr && told_relay_observed_addr {
-                        break;
+                let mut stack: SmallVec<[vec::IntoIter<Cid>; 8]> = SmallVec::new();
+                stack.push(vec![root].into_iter());
+
+                while !stack.is_empty() {
+                    let next = stack.last_mut().expect("stack should be non-empty").next();
+
+                    match next {
+                        None => {
+                            stack.pop();
+                        }
+                        Some(cid) => {
+                            if let Ok(blk) = session.get_block(&cid).await {
+                                if let Ok(links) = parse_links(blk.cid(), blk.data()) {
+                                    stack.push(links.clone().into_iter());
+                                    let _ = self.store.put(cid, blk.data(), links);
+                                }
+                            };
+                        }
                     }
                 }
+                let _ = session.stop().await;
+                let _ = sender.send(Ok(()));
             }
         }
     }
