@@ -17,9 +17,10 @@ use libp2p::{
     Multiaddr, PeerId, Swarm,
 };
 use log::{debug, info, warn};
+use smallvec::SmallVec;
 use std::collections::BTreeSet;
-use std::env;
 use std::path::PathBuf;
+use std::{env, vec};
 use tokio::fs::File;
 use tokio::io::BufReader;
 
@@ -95,7 +96,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let (cmd_sender, cmd_receiver) = mpsc::channel(0);
     let (evt_sender, mut evt_receiver) = mpsc::channel(0);
 
-    let ev_loop = EventLoop::new(swarm, cmd_receiver, evt_sender);
+    let ev_loop = EventLoop::new(swarm, store.clone(), cmd_receiver, evt_sender);
 
     tokio::task::spawn(ev_loop.run());
 
@@ -237,7 +238,8 @@ impl Client {
 }
 
 struct EventLoop {
-    swarm: Swarm<PopTartBehaviour<RockStore>>,
+    swarm: Swarm<PopTartBehaviour>,
+    store: RockStore,
     command_receiver: mpsc::Receiver<Command>,
     event_sender: mpsc::Sender<Event>,
     dial_requests: HashMap<PeerId, oneshot::Sender<anyhow::Result<()>>>,
@@ -245,12 +247,14 @@ struct EventLoop {
 
 impl EventLoop {
     fn new(
-        swarm: Swarm<PopTartBehaviour<RockStore>>,
+        swarm: Swarm<PopTartBehaviour>,
+        store: RockStore,
         command_receiver: mpsc::Receiver<Command>,
         event_sender: mpsc::Sender<Event>,
     ) -> Self {
         Self {
             swarm,
+            store,
             command_receiver,
             event_sender,
             dial_requests: Default::default(),
@@ -272,8 +276,8 @@ impl EventLoop {
     fn handle_swarm_event(
         &mut self,
         event: SwarmEvent<
-            <PopTartBehaviour<RockStore> as NetworkBehaviour>::OutEvent,
-            <<<PopTartBehaviour<RockStore> as NetworkBehaviour>::ConnectionHandler as IntoConnectionHandler>::Handler as ConnectionHandler>::Error>,
+            <PopTartBehaviour as NetworkBehaviour>::OutEvent,
+            <<<PopTartBehaviour as NetworkBehaviour>::ConnectionHandler as IntoConnectionHandler>::Handler as ConnectionHandler>::Error>,
     ) {
         match event {
             SwarmEvent::NewListenAddr { address, .. } => {
@@ -359,12 +363,34 @@ impl EventLoop {
                         sender.send(Err(anyhow::format_err!("multiaddr was not a p2p address")));
                 }
             }
+            // Currently all we do here is follow every link we can find and store the blocks.
             Command::Resolve { root, sender } => {
                 let behaviour = self.swarm.behaviour();
-                let _ = match behaviour.bitswap.client().get_block(&root).await {
-                    Ok(_) => sender.send(Ok(())),
-                    Err(err) => sender.send(Err(err)),
-                };
+
+                let session = behaviour.bitswap.client().new_session().await;
+
+                let mut stack: SmallVec<[vec::IntoIter<Cid>; 8]> = SmallVec::new();
+                stack.push(vec![root].into_iter());
+
+                while !stack.is_empty() {
+                    let next = stack.last_mut().expect("stack should be non-empty").next();
+
+                    match next {
+                        None => {
+                            stack.pop();
+                        }
+                        Some(cid) => {
+                            if let Ok(blk) = session.get_block(&cid).await {
+                                if let Ok(links) = parse_links(blk.cid(), blk.data()) {
+                                    stack.push(links.clone().into_iter());
+                                    let _ = self.store.put(cid, blk.data(), links);
+                                }
+                            };
+                        }
+                    }
+                }
+                let _ = session.stop().await;
+                let _ = sender.send(Ok(()));
             }
         }
     }

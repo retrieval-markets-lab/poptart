@@ -1,4 +1,5 @@
-use iroh_bitswap::{Bitswap, BitswapEvent, Config as BitswapConfig, Store};
+use crate::store::RockStore;
+use iroh_bitswap::{Bitswap, BitswapEvent, Config as BitswapConfig};
 use libp2p::relay::v2::{
     client::Client as RelayClient, client::Event as RelayClientEvent, relay::Event as RelayEvent,
     relay::Relay,
@@ -19,21 +20,21 @@ pub const AGENT_VERSION: &str = concat!("poptart/", env!("CARGO_PKG_VERSION"));
 
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "Event", event_process = false)]
-pub struct PopTartBehaviour<S: Store> {
+pub struct PopTartBehaviour {
     relay_client: Toggle<RelayClient>,
     relay: Toggle<Relay>,
     identify: Identify,
     dcutr: Toggle<Dcutr>,
-    pub bitswap: Bitswap<S>,
+    pub bitswap: Bitswap<RockStore>,
 }
 
-unsafe impl<S: Store> Send for PopTartBehaviour<S> {}
-unsafe impl<S: Store> Sync for PopTartBehaviour<S> {}
+unsafe impl Send for PopTartBehaviour {}
+unsafe impl Sync for PopTartBehaviour {}
 
-impl<S: Store> PopTartBehaviour<S> {
+impl PopTartBehaviour {
     pub async fn new(
         keys: &Keypair,
-        store: S,
+        store: RockStore,
         is_relay_client: bool,
         relay_client: Option<relay::v2::client::Client>,
     ) -> Self {
