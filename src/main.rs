@@ -120,23 +120,15 @@ async fn main() -> Result<(), anyhow::Error> {
 
             let car_reader = CarReader::new(buf_reader).await?;
             let root = car_reader.header().roots()[0];
-            let stream = car_reader.stream().boxed();
+            let mut stream = car_reader.stream().boxed();
 
-            let store_clone = store.clone();
-            stream
-                .try_for_each(move |(cid, data)| {
-                    let store = store_clone.clone();
-                    let mut client = client.clone();
-                    async move {
-                        let data = Bytes::from(data);
-                        let blk = Block::new(data, cid);
-                        let links = parse_links(&cid, blk.data()).unwrap_or_default();
-                        store.put(cid, blk.data(), links)?;
-                        client.notify_new_blocks_bitswap(vec![blk]).await?;
-                        Ok(())
-                    }
-                })
-                .await?;
+            while let Some(Ok((cid, data))) = stream.next().await {
+                let data = Bytes::from(data);
+                let blk = Block::new(data, cid);
+                let links = parse_links(&cid, blk.data()).unwrap_or_default();
+                store.put(cid, blk.data(), links)?;
+                client.notify_new_blocks_bitswap(vec![blk]).await?;
+            }
             info!("imported car file with root {:?} into store...", root);
 
             loop {
