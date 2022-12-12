@@ -26,3 +26,8 @@ bytecheck = "0.6.7"
 libipld = "0.15.0"
 dirs-next = "2.0.0"
 tempfile = "3.3.0"
+
+[workspace]
+members = [
+  "tork",
+]
