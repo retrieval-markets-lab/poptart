@@ -1,0 +1,39 @@
+[package]
+name = "tork"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0"
+async-trait = "0.1.57"
+async-channel = "1.7.1"
+async-stream = "0.3.3"
+deque = "0.3.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_tuple = "0.5"
+serde_repr = "0.1"
+serde_ipld_dagcbor = "0.2.2"
+serde_bytes = { package = "cs_serde_bytes", version = "0.12" }
+libipld = { version = "0.15", features = ["serde-codec"] }
+libp2p = { version = "0.50", default-features = false }
+futures = "0.3.21"
+asynchronous-codec = "0.6.1"
+unsigned-varint = { version = "0.7.0", features = ["asynchronous_codec"] }
+tokio = { version = "1", features = ["sync"] }
+bytes = { version = "1.1.0", features = ["serde"] }
+smallvec = "1.9.0"
+tracing = "0.1.34"
+rand = "0.8.5"
+
+[dev-dependencies]
+criterion = {version = "0.4.0", features = ["async_tokio"]}
+libp2p = { version = "0.50", features = ["noise", "tcp", "yamux", "tokio"], default-features = false }
+tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread"] }
+tracing-subscriber = { version = "0.3.11", features = ["env-filter"] }
+
+[[bench]]
+name = "transfers"
+harness = false
+
