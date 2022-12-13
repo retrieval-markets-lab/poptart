@@ -363,6 +363,9 @@ impl EventLoop {
                 } = e
                 {
                     info!("peer told us our public address: {:?}", observed_addr);
+                    if let Some(bitswap) = self.swarm.behaviour().bitswap.as_ref() {
+                        bitswap.on_identify(&peer_id, &protocols);
+                    }
                     self.dial_requests
                         .remove(&peer_id)
                         .and_then(|sender| sender.send(Ok(())).ok());
