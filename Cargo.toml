@@ -26,3 +26,11 @@ bytecheck = "0.6.7"
 libipld = "0.15.0"
 dirs-next = "2.0.0"
 tempfile = "3.3.0"
+tork = { version = "0.1", path = "./tork" }
+tracing = "0.1.34"
+tracing-subscriber = { version = "0.3.11", features = ["env-filter"] }
+
+[workspace]
+members = [
+  "tork",
+]
