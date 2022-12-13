@@ -1,4 +1,5 @@
 use crate::store::RockStore;
+use clap::{Parser, ValueEnum};
 use iroh_bitswap::{Bitswap, BitswapEvent};
 use libp2p::relay::v2::{
     client::Client as RelayClient, client::Event as RelayClientEvent, relay::Event as RelayEvent,
@@ -34,26 +35,11 @@ pub struct PopTartBehaviour {
 #[derive(Clone, Debug)]
 pub struct ProtocolParserError(String);
 
-#[derive(Default, Copy, Clone, Debug)]
+#[derive(Default, Copy, Clone, Debug, ValueEnum)]
 pub enum TransferProtocol {
     #[default]
     Tork,
     Bitswap,
-}
-impl FromStr for TransferProtocol {
-    type Err = ProtocolParserError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s == "bitswap" {
-            Ok(TransferProtocol::Bitswap)
-        } else if s == "tork" {
-            Ok(TransferProtocol::Tork)
-        } else {
-            Err(ProtocolParserError(
-                "incorrectly formatted protocol string".to_string(),
-            ))
-        }
-    }
 }
 
 #[derive(Default, Clone, Copy)]

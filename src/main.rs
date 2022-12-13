@@ -1,7 +1,7 @@
 use ahash::HashMap;
 use bytes::Bytes;
 use cid::Cid;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use futures::{
     channel::{mpsc, oneshot},
     prelude::*,
@@ -67,8 +67,16 @@ async fn main() -> Result<(), anyhow::Error> {
     info!("starting poptart 🍭 ...");
     let opt = Opt::parse();
     let mut config = PopTartConfig::default();
-    config.transfer_protocol = TransferProtocol::from_str(&opt.transfer_protocol)
-        .expect("failed to parse protocol string");
+
+    match opt.transfer_protocol {
+        TransferProtocol::Bitswap => {
+            info!("running bitswap");
+        }
+        TransferProtocol::Tork => {
+            info!("running tork");
+        }
+    }
+
     if let CliArgument::Relay { .. } = opt.argument {
         info!("you are a hole-punching 🧃 relay. thank you for your service 🫡.");
         config.is_relay = true;
@@ -169,8 +177,8 @@ struct Opt {
     port: u16,
     #[clap(long)]
     relay: Option<Multiaddr>,
-    #[clap(long)]
-    transfer_protocol: String,
+    #[clap(long, value_enum)]
+    transfer_protocol: TransferProtocol,
     #[clap(subcommand)]
     argument: CliArgument,
 }
