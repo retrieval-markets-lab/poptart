@@ -155,8 +155,13 @@ async fn main() -> Result<(), anyhow::Error> {
             for peer in peers {
                 client.dial(peer).await?;
             }
-            client.resolve(root).await?;
-            info!("resolved content");
+            let start = Instant::now();
+            let size = client.resolve(root).await?;
+            info!(
+                "transfered {}bytes in {}ms",
+                size,
+                start.elapsed().as_millis()
+            );
         }
         CliArgument::Relay {} => loop {
             match evt_receiver.next().await {
@@ -177,7 +182,7 @@ struct Opt {
     port: u16,
     #[clap(long)]
     relay: Option<Multiaddr>,
-    #[clap(long, value_enum)]
+    #[clap(long, short, value_enum)]
     transfer_protocol: TransferProtocol,
     #[clap(subcommand)]
     argument: CliArgument,
@@ -210,7 +215,7 @@ enum Command {
     },
     Resolve {
         root: Cid,
-        sender: oneshot::Sender<anyhow::Result<()>>,
+        sender: oneshot::Sender<anyhow::Result<usize>>,
     },
     NotifyNewBlocks {
         blocks: Vec<Block>,
@@ -238,7 +243,7 @@ impl Client {
     }
 
     /// Resolves IPFS content via Bitswap
-    pub async fn resolve(&mut self, root: Cid) -> anyhow::Result<()> {
+    pub async fn resolve(&mut self, root: Cid) -> anyhow::Result<usize> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Command::Resolve { root, sender })
@@ -415,12 +420,12 @@ impl EventLoop {
                 if let Some(bitswap) = behaviour.bitswap.as_ref() {
                     let client = bitswap.client().clone();
                     tokio::task::spawn(async move {
-                        let start = Instant::now();
-
                         let session = client.new_session().await;
 
                         let mut stack: SmallVec<[vec::IntoIter<Cid>; 8]> = SmallVec::new();
                         stack.push(vec![root].into_iter());
+
+                        let mut size = 0;
 
                         while !stack.is_empty() {
                             let next = stack.last_mut().expect("stack should be non-empty").next();
@@ -434,15 +439,15 @@ impl EventLoop {
                                         if let Ok(links) = parse_links(blk.cid(), blk.data()) {
                                             stack.push(links.clone().into_iter());
                                             let _ = store.put(cid, blk.data(), links);
+                                            size += blk.data().len();
                                         }
                                     };
                                 }
                             }
                         }
-                        info!("completed transfer in {}ms", start.elapsed().as_millis());
 
                         let _ = session.stop().await;
-                        let _ = sender.send(Ok(()));
+                        let _ = sender.send(Ok(size));
                     });
                 } else if let Some(tork) = behaviour.tork.as_ref() {
                     let session = match tork.new_session() {
@@ -454,16 +459,19 @@ impl EventLoop {
                     };
 
                     tokio::task::spawn(async move {
-                        let start = Instant::now();
-
                         let stream = session.resolve_all(root).await;
 
-                        if let Err(err) = stream.try_collect::<Vec<_>>().await {
-                            sender.send(Err(err)).ok();
-                        } else {
-                            sender.send(Ok(())).ok();
+                        match stream
+                            .try_fold(0, |tot, blk| async move { Ok(tot + blk.size()) })
+                            .await
+                        {
+                            Err(err) => {
+                                sender.send(Err(err)).ok();
+                            }
+                            Ok(size) => {
+                                sender.send(Ok(size)).ok();
+                            }
                         }
-                        info!("completed transfer in {}ms", start.elapsed().as_millis());
 
                         session.stop();
                     });
