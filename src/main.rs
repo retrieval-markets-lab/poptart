@@ -22,6 +22,7 @@ use log::{debug, info, warn};
 use smallvec::SmallVec;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::time::Instant;
 use std::{env, vec};
 use tokio::fs::File;
 use tokio::io::BufReader;
@@ -297,7 +298,7 @@ impl EventLoop {
             tokio::select! {
                 event = self.swarm.select_next_some() => self.handle_swarm_event(event),
                 command = self.command_receiver.next() => match command {
-                    Some(c) => self.handle_command(c).await,
+                    Some(c) => self.handle_command(c),
                     None => return,
                 },
             }
@@ -369,7 +370,7 @@ impl EventLoop {
         }
     }
 
-    async fn handle_command(&mut self, command: Command) {
+    fn handle_command(&mut self, command: Command) {
         match command {
             Command::Start { addr, sender } => {
                 let _ = match self.swarm.listen_on(addr) {
@@ -406,31 +407,40 @@ impl EventLoop {
             // Currently all we do here is follow every link we can find and store the blocks.
             Command::Resolve { root, sender } => {
                 let behaviour = self.swarm.behaviour();
+                let store = self.store.clone();
 
-                let session = behaviour.bitswap.client().new_session().await;
+                let client = behaviour.bitswap.client().clone();
 
-                let mut stack: SmallVec<[vec::IntoIter<Cid>; 8]> = SmallVec::new();
-                stack.push(vec![root].into_iter());
+                tokio::task::spawn(async move {
+                    let start = Instant::now();
 
-                while !stack.is_empty() {
-                    let next = stack.last_mut().expect("stack should be non-empty").next();
+                    let session = client.new_session().await;
 
-                    match next {
-                        None => {
-                            stack.pop();
-                        }
-                        Some(cid) => {
-                            if let Ok(blk) = session.get_block(&cid).await {
-                                if let Ok(links) = parse_links(blk.cid(), blk.data()) {
-                                    stack.push(links.clone().into_iter());
-                                    let _ = self.store.put(cid, blk.data(), links);
-                                }
-                            };
+                    let mut stack: SmallVec<[vec::IntoIter<Cid>; 8]> = SmallVec::new();
+                    stack.push(vec![root].into_iter());
+
+                    while !stack.is_empty() {
+                        let next = stack.last_mut().expect("stack should be non-empty").next();
+
+                        match next {
+                            None => {
+                                stack.pop();
+                            }
+                            Some(cid) => {
+                                if let Ok(blk) = session.get_block(&cid).await {
+                                    if let Ok(links) = parse_links(blk.cid(), blk.data()) {
+                                        stack.push(links.clone().into_iter());
+                                        let _ = store.put(cid, blk.data(), links);
+                                    }
+                                };
+                            }
                         }
                     }
-                }
-                let _ = session.stop().await;
-                let _ = sender.send(Ok(()));
+                    info!("completed transfer in {}ms", start.elapsed().as_millis());
+
+                    let _ = session.stop().await;
+                    let _ = sender.send(Ok(()));
+                });
             }
         }
     }
