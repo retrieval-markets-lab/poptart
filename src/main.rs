@@ -1,7 +1,7 @@
 use ahash::HashMap;
 use bytes::Bytes;
 use cid::Cid;
-use clap::{Parser, ValueEnum};
+use clap::Parser;
 use futures::{
     channel::{mpsc, oneshot},
     prelude::*,
@@ -22,16 +22,18 @@ use log::{debug, info, warn};
 use smallvec::SmallVec;
 use std::path::PathBuf;
 use std::time::Instant;
-use std::{collections::BTreeSet, str::FromStr};
+use std::{collections::BTreeSet, time::Duration};
 use std::{env, vec};
 use tokio::fs::File;
 use tokio::io::BufReader;
 
 mod behaviour;
+mod metrics;
 mod store;
 mod transport;
 
 use behaviour::*;
+use metrics::*;
 use store::RockStore;
 use transport::*;
 
@@ -101,6 +103,19 @@ async fn main() -> Result<(), anyhow::Error> {
         RockStore::create(store_path).await?
     };
 
+    let metrics = match opt.metrics_json {
+        Some(path) => {
+            let config = MetricsConfig::from_path(path)
+                .expect("provided an invalid path for metrics config file");
+            info!("initialized metrics 🔍.");
+            Some(Metrics::new(config))
+        }
+        _ => {
+            info!("did not initialize metrics");
+            None
+        }
+    };
+
     info!("setting up transport 🏎️ ...");
     let (transport, relay_client) = build_transport(&keys, config.is_relay_client).await;
 
@@ -157,11 +172,22 @@ async fn main() -> Result<(), anyhow::Error> {
             }
             let start = Instant::now();
             let size = client.resolve(root).await?;
-            info!(
-                "transfered {}bytes in {}ms",
-                size,
-                start.elapsed().as_millis()
-            );
+            let elapsed = start.elapsed().as_millis();
+            info!("transfered {}bytes in {}ms", size, elapsed);
+            // if not initted it won't do anything
+            match metrics {
+                Some(m) => {
+                    debug!("pushing metrics");
+                    m.observe(
+                        opt.transfer_protocol,
+                        root.to_string(),
+                        size as u64,
+                        elapsed as f64,
+                    );
+                    m.push().await.unwrap();
+                }
+                _ => {}
+            };
         }
         CliArgument::Relay {} => loop {
             match evt_receiver.next().await {
@@ -182,6 +208,8 @@ struct Opt {
     port: u16,
     #[clap(long)]
     relay: Option<Multiaddr>,
+    #[clap(long)]
+    metrics_json: Option<PathBuf>,
     #[clap(long, short, value_enum)]
     transfer_protocol: TransferProtocol,
     #[clap(subcommand)]
@@ -222,7 +250,6 @@ enum Command {
     },
 }
 
-#[derive(Clone)]
 struct Client {
     sender: mpsc::Sender<Command>,
 }

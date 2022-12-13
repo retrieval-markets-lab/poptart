@@ -13,6 +13,7 @@ iroh-bitswap = "0.1.3"
 iroh-car = "0.1.3"
 libp2p = { version = "0.50", features = ["yamux", "noise", "tcp", "tokio", "quic", "dns", "websocket", "macros", "relay", "dcutr", "identify"], default-features = false }
 tokio = { version = "1", features = ["macros", "net", "rt", "fs"] }
+reqwest = { version = "0.11.10", features = ["rustls-tls"], default-features = false}
 cid = "0.9"
 async-trait = "0.1.57"
 ahash = "0.8.0"
@@ -29,6 +30,10 @@ tempfile = "3.3.0"
 tork = { version = "0.1", path = "./tork" }
 tracing = "0.1.34"
 tracing-subscriber = { version = "0.3.11", features = ["env-filter"] }
+prometheus-client = "0.18.1"
+chrono = "0.4.23"
+serde_json = "1.0"
+serde = "1.0.150"
 
 [workspace]
 members = [
