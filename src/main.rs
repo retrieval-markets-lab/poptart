@@ -437,9 +437,9 @@ impl EventLoop {
 
                 if let Some(bitswap) = behaviour.bitswap.as_ref() {
                     let client = bitswap.client().clone();
+                    let mut measurement =
+                        TransferMeasurement::new("bitswap".to_string(), root.to_string());
                     tokio::task::spawn(async move {
-                        let start = Instant::now();
-
                         let session = client.new_session().await;
 
                         let mut stack: SmallVec<[vec::IntoIter<Cid>; 8]> = SmallVec::new();
@@ -455,6 +455,7 @@ impl EventLoop {
                                 Some(cid) => {
                                     if let Ok(blk) = session.get_block(&cid).await {
                                         if let Ok(links) = parse_links(blk.cid(), blk.data()) {
+                                            measurement.increment(blk.data().len() as i64);
                                             stack.push(links.clone().into_iter());
                                             let _ = store.put(cid, blk.data(), links);
                                         }
@@ -462,7 +463,11 @@ impl EventLoop {
                                 }
                             }
                         }
-                        info!("completed transfer in {}ms", start.elapsed().as_millis());
+
+                        info!(
+                            "transferred {}bytes in {}ms",
+                            measurement.data_size, measurement.transfer_time
+                        );
 
                         let _ = session.stop().await;
                         let _ = sender.send(Ok(()));
