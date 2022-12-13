@@ -112,7 +112,7 @@ impl PopTartBehaviour {
 
 #[derive(Debug)]
 pub enum Event {
-    TorkEvent,
+    Tork,
     RelayClient(RelayClientEvent),
     Relay(RelayEvent),
     Dcutr(DcutrEvent),
@@ -122,7 +122,7 @@ pub enum Event {
 
 impl From<()> for Event {
     fn from(_: ()) -> Self {
-        Event::TorkEvent
+        Event::Tork
     }
 }
 

@@ -51,9 +51,7 @@ impl MetricsConfig {
         };
         match serde_json::from_str(&data) {
             Ok(c) => Ok(c),
-            Err(e) => {
-                return Err(Box::new(e));
-            }
+            Err(e) => Err(Box::new(e)),
         }
     }
 }

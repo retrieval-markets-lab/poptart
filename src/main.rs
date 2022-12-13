@@ -20,9 +20,9 @@ use libp2p::{
 };
 use log::{debug, info, warn};
 use smallvec::SmallVec;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Instant;
-use std::{collections::BTreeSet, time::Duration};
 use std::{env, vec};
 use tokio::fs::File;
 use tokio::io::BufReader;
@@ -83,7 +83,7 @@ async fn main() -> Result<(), anyhow::Error> {
         info!("you are a hole-punching 🧃 relay. thank you for your service 🫡.");
         config.is_relay = true;
     };
-    if let Some(_) = opt.relay {
+    if opt.relay.is_some() {
         info!("we'll be punching 🧃 through NATs today.");
         config.is_relay_client = true;
     };
@@ -103,17 +103,12 @@ async fn main() -> Result<(), anyhow::Error> {
         RockStore::create(store_path).await?
     };
 
-    let metrics = match opt.metrics_json {
-        Some(path) => {
-            let config = MetricsConfig::from_path(path)
-                .expect("provided an invalid path for metrics config file");
-            info!("initialized metrics 🔍.");
-            Some(Metrics::new(config))
-        }
-        _ => {
-            info!("did not initialize metrics");
-            None
-        }
+    let metrics = if let Some(path) = opt.metrics_json {
+        let config = MetricsConfig::from_path(path).expect("invalid metrics config file");
+        info!("initialized metrics 🔍.");
+        Some(Metrics::new(config))
+    } else {
+        None
     };
 
     info!("setting up transport 🏎️ ...");
@@ -161,9 +156,7 @@ async fn main() -> Result<(), anyhow::Error> {
             info!("imported car file with root {:?} into store...", root);
 
             loop {
-                match evt_receiver.next().await {
-                    _ => (),
-                }
+                evt_receiver.next().await;
             }
         }
         CliArgument::Resolve { peers, root } => {
@@ -174,25 +167,18 @@ async fn main() -> Result<(), anyhow::Error> {
             let size = client.resolve(root).await?;
             let elapsed = start.elapsed().as_millis();
             info!("transfered {}bytes in {}ms", size, elapsed);
-            // if not initted it won't do anything
-            match metrics {
-                Some(m) => {
-                    debug!("pushing metrics");
-                    m.observe(
-                        opt.transfer_protocol,
-                        root.to_string(),
-                        size as u64,
-                        elapsed as f64,
-                    );
-                    m.push().await.unwrap();
-                }
-                _ => {}
+            if let Some(m) = metrics {
+                m.observe(
+                    opt.transfer_protocol,
+                    root.to_string(),
+                    size as u64,
+                    elapsed as f64,
+                );
+                m.push().await.unwrap();
             };
         }
         CliArgument::Relay {} => loop {
-            match evt_receiver.next().await {
-                _ => (),
-            }
+            evt_receiver.next().await;
         },
     };
 
@@ -350,12 +336,13 @@ impl EventLoop {
                     address.with(Protocol::P2p(local_peer_id.into()))
                 );
             }
-            SwarmEvent::OutgoingConnectionError { peer_id, error } => {
-                if let Some(peer_id) = peer_id {
-                    self.dial_requests
-                        .remove(&peer_id)
-                        .and_then(|sender| sender.send(Err(error.into())).ok());
-                }
+            SwarmEvent::OutgoingConnectionError {
+                peer_id: Some(peer),
+                error,
+            } => {
+                self.dial_requests
+                    .remove(&peer)
+                    .and_then(|sender| sender.send(Err(error.into())).ok());
             }
             SwarmEvent::Behaviour(event) => self.handle_behaviour_event(event),
             _ => {}
@@ -393,7 +380,7 @@ impl EventLoop {
                         .and_then(|sender| sender.send(Ok(())).ok());
                 }
             }
-            Event::TorkEvent => {}
+            Event::Tork => {}
             Event::Bitswap(e) => {
                 debug!("bitswap event: {:?}", e);
                 let _ = self.event_sender.send(Event::Bitswap(e));
