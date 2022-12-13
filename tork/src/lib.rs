@@ -21,7 +21,6 @@ use std::{
     sync::{Arc, Mutex},
     task::{Context, Poll},
 };
-use tracing::info;
 
 mod prefix;
 mod protocol;
@@ -133,7 +132,6 @@ impl<S: Store> NetworkBehaviour for Tork<S> {
 
     fn inject_event(&mut self, peer: PeerId, connection_id: ConnectionId, event: Message) {
         if let Some(req) = event.request {
-            info!("{:} received a request", self.self_id);
             tokio::task::spawn({
                 let store = self.store.clone();
                 let sender = self.network_sender.clone();
@@ -274,7 +272,6 @@ impl ConnectionHandler for TorkHandler {
         protocol: <Self::OutboundProtocol as OutboundUpgrade<NegotiatedSubstream>>::Output,
         message: Self::OutboundOpenInfo,
     ) {
-        info!("negociated outbound");
         self.substream = Some(SubstreamState::PendingSendWithResponse(protocol, message));
     }
 
@@ -310,7 +307,6 @@ impl ConnectionHandler for TorkHandler {
             self.outbound_substream_establishing = true;
 
             if let HandlerInEvent::Request(msg, sender) = message {
-                info!("sending outbound request");
                 return Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest {
                     protocol: self.listen_protocol.clone().map_info(|()| (msg, sender)),
                 });
@@ -520,7 +516,7 @@ mod tests {
     use libp2p::swarm::{Swarm, SwarmEvent};
     use tokio::sync::mpsc;
     use tracing::{info, trace, Level};
-    use tracing_subscriber::{filter::LevelFilter, fmt, prelude::*};
+    // use tracing_subscriber::{filter::LevelFilter, fmt, prelude::*};
 
     use super::*;
 
@@ -629,7 +625,7 @@ mod tests {
         let session = swarm2_tk.new_session().unwrap();
         let content = session.resolve_all(root).await;
 
-        let results = content.try_collect::<Vec<Ipld>>().await.unwrap();
+        let results = content.try_collect::<Vec<_>>().await.unwrap();
 
         assert_eq!(results.len(), NB);
 

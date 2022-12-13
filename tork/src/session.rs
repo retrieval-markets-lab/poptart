@@ -2,19 +2,48 @@ use crate::prefix::Prefix;
 use crate::protocol::{Message, StatusCode, Store};
 use anyhow::Result;
 use async_stream::try_stream;
+use bytes::Bytes;
 use futures::{prelude::*, stream::FuturesUnordered};
 use libipld::codec::Codec;
 use libipld::codec_impl::IpldCodec;
 use libipld::{Cid, Ipld};
 use libp2p::{core::connection::ConnectionId, PeerId};
-use std::{collections::BTreeSet, sync::Arc};
+use std::{collections::BTreeSet, fmt, sync::Arc};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-pub type BlockSender = oneshot::Sender<Result<(Ipld, Vec<Cid>)>>;
+pub type BlockSender = oneshot::Sender<Result<Block>>;
 pub type ResponseSender = oneshot::Sender<Result<Message>>;
 pub type NetworkSender = async_channel::Sender<NetEvent>;
+
+#[derive(Clone)]
+pub struct Block {
+    pub cid: Cid,
+    pub value: Ipld,
+    pub data: Bytes,
+    pub links: Vec<Cid>,
+}
+
+impl Block {
+    pub fn new(cid: Cid, value: Ipld, data: Bytes, links: Vec<Cid>) -> Self {
+        Block {
+            cid,
+            value,
+            data,
+            links,
+        }
+    }
+    pub fn size(&self) -> usize {
+        self.data.len()
+    }
+}
+
+impl fmt::Debug for Block {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Block").field("cid", &self.cid).finish()
+    }
+}
 
 #[derive(Debug)]
 pub enum NetEvent {
@@ -98,7 +127,7 @@ impl<S: Store> Session<S> {
                                     let links = linkset.into_iter().collect::<Vec<Cid>>();
 
                                     store.put(cid, &blk.data, links.clone())?;
-                                    Ok((node, links))
+                                    Ok(Block::new(cid, node, blk.data.clone(), links))
                                 });
                             if let Err(err) = task.result.send(result) {
                                 warn!("task result sender: {:?}", err);
@@ -119,24 +148,24 @@ impl<S: Store> Session<S> {
         }
     }
 
-    pub async fn resolve_all(&self, root: Cid) -> impl Stream<Item = Result<Ipld>> + '_ {
+    pub async fn resolve_all(&self, root: Cid) -> impl Stream<Item = Result<Block>> + '_ {
         let mut jobs = FuturesUnordered::new();
         jobs.push(self.load_link(root));
 
         try_stream! {
 
-            while let Some(Ok((node, links))) = jobs.next().await {
+            while let Some(Ok(blk)) = jobs.next().await {
 
-                for l in links.into_iter() {
-                    jobs.push(self.load_link(l));
+                for l in &blk.links {
+                    jobs.push(self.load_link(*l));
                 }
 
-                yield node;
+                yield blk;
             }
         }
     }
 
-    pub async fn load_link(&self, cid: Cid) -> Result<(Ipld, Vec<Cid>)> {
+    pub async fn load_link(&self, cid: Cid) -> Result<Block> {
         let (s, r) = oneshot::channel();
         self.links.send(Task { cid, result: s }).await?;
         match r.await {
@@ -238,7 +267,7 @@ mod tests {
 
         let content = session.resolve_all(root).await;
 
-        let results = content.try_collect::<Vec<Ipld>>().await.unwrap();
+        let results = content.try_collect::<Vec<_>>().await.unwrap();
         assert_eq!(results.len(), blocks.len());
     }
 
