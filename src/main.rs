@@ -108,14 +108,13 @@ async fn main() -> Result<(), anyhow::Error> {
     tokio::task::spawn(ev_loop.run());
 
     let mut client = Client::new(cmd_sender);
+    client
+        .start(format!("/ip4/0.0.0.0/tcp/{:}", opt.port).parse()?)
+        .await
+        .expect("swarm to start listening");
 
     match opt.argument {
-        CliArgument::Provide { path, port } => {
-            client
-                .start(format!("/ip4/0.0.0.0/tcp/{:}", port).parse()?)
-                .await
-                .expect("swarm to start listening");
-
+        CliArgument::Provide { path } => {
             if let Some(addr) = opt.relay {
                 client.dial(addr).await?;
             }
@@ -144,30 +143,18 @@ async fn main() -> Result<(), anyhow::Error> {
                 }
             }
         }
-        CliArgument::Resolve { peers, root, port } => {
-            client
-                .start(format!("/ip4/0.0.0.0/tcp/{:}", port).parse()?)
-                .await
-                .expect("swarm to start listening");
-
+        CliArgument::Resolve { peers, root } => {
             for peer in peers {
                 client.dial(peer).await?;
             }
             client.resolve(root).await?;
             info!("resolved content");
         }
-        CliArgument::Relay { port } => {
-            client
-                .start(format!("/ip4/0.0.0.0/tcp/{:}", port).parse()?)
-                .await
-                .expect("swarm to start listening");
-
-            loop {
-                match evt_receiver.next().await {
-                    _ => (),
-                }
+        CliArgument::Relay {} => loop {
+            match evt_receiver.next().await {
+                _ => (),
             }
-        }
+        },
     };
 
     Ok(())
@@ -178,6 +165,8 @@ async fn main() -> Result<(), anyhow::Error> {
 struct Opt {
     #[clap(long)]
     tempstore: bool,
+    #[clap(long, default_value_t = 2001)]
+    port: u16,
     #[clap(long)]
     relay: Option<Multiaddr>,
     #[clap(long)]
@@ -188,23 +177,16 @@ struct Opt {
 
 #[derive(Debug, Parser)]
 enum CliArgument {
-    Relay {
-        #[arg(default_value_t = 2001)]
-        port: u16,
-    },
+    Relay {},
     Provide {
         #[clap(long)]
         path: PathBuf,
-        #[arg(default_value_t = 2001)]
-        port: u16,
     },
     Resolve {
         #[clap(long)]
         root: Cid,
         #[clap(long)]
         peers: Vec<Multiaddr>,
-        #[arg(default_value_t = 2002)]
-        port: u16,
     },
 }
 
