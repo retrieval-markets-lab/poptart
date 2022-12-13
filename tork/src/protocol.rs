@@ -75,6 +75,16 @@ impl Message {
             }),
         }
     }
+
+    pub fn not_found() -> Self {
+        Message {
+            request: None,
+            response: Some(Response {
+                status: StatusCode::NotFound,
+                blocks: vec![],
+            }),
+        }
+    }
 }
 
 impl From<Request> for Message {

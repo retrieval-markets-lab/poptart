@@ -21,6 +21,7 @@ use libp2p::{
 use log::{debug, info, warn};
 use smallvec::SmallVec;
 use std::collections::BTreeSet;
+use std::env;
 use std::path::PathBuf;
 use std::time::Instant;
 use std::{env, vec};
@@ -63,6 +64,7 @@ fn poptart_data_root() -> anyhow::Result<PathBuf> {
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     colog::init();
+
     info!("starting poptart 🍭 ...");
     let opt = Opt::parse();
     let is_relay_client = if let CliArgument::Relay { .. } = opt.argument {
@@ -148,6 +150,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 client.dial(peer).await?;
             }
             client.resolve(root).await?;
+            info!("resolved content");
         }
         CliArgument::Relay { port } => {
             client
@@ -354,19 +357,13 @@ impl EventLoop {
                 } = e
                 {
                     info!("peer told us our public address: {:?}", observed_addr);
-                    self.swarm
-                        .behaviour()
-                        .bitswap
-                        .on_identify(&peer_id, &protocols);
                     self.dial_requests
                         .remove(&peer_id)
                         .and_then(|sender| sender.send(Ok(())).ok());
                 }
             }
-            Event::Bitswap(e) => {
-                debug!("bitswap event: {:?}", e);
-                let _ = self.event_sender.send(Event::Bitswap(e));
-            }
+            Event::TorkEvent => {}
+            Event::Bitswap(_) => {}
         }
     }
 
@@ -409,38 +406,64 @@ impl EventLoop {
                 let behaviour = self.swarm.behaviour();
                 let store = self.store.clone();
 
-                let client = behaviour.bitswap.client().clone();
+                if let Some(bitswap) = behaviour.bitswap {
+                    let client = bitswap.client().clone();
+                    tokio::task::spawn(async move {
+                        let start = Instant::now();
 
-                tokio::task::spawn(async move {
-                    let start = Instant::now();
+                        let session = client.new_session().await;
 
-                    let session = client.new_session().await;
+                        let mut stack: SmallVec<[vec::IntoIter<Cid>; 8]> = SmallVec::new();
+                        stack.push(vec![root].into_iter());
 
-                    let mut stack: SmallVec<[vec::IntoIter<Cid>; 8]> = SmallVec::new();
-                    stack.push(vec![root].into_iter());
+                        while !stack.is_empty() {
+                            let next = stack.last_mut().expect("stack should be non-empty").next();
 
-                    while !stack.is_empty() {
-                        let next = stack.last_mut().expect("stack should be non-empty").next();
-
-                        match next {
-                            None => {
-                                stack.pop();
-                            }
-                            Some(cid) => {
-                                if let Ok(blk) = session.get_block(&cid).await {
-                                    if let Ok(links) = parse_links(blk.cid(), blk.data()) {
-                                        stack.push(links.clone().into_iter());
-                                        let _ = store.put(cid, blk.data(), links);
-                                    }
-                                };
+                            match next {
+                                None => {
+                                    stack.pop();
+                                }
+                                Some(cid) => {
+                                    if let Ok(blk) = session.get_block(&cid).await {
+                                        if let Ok(links) = parse_links(blk.cid(), blk.data()) {
+                                            stack.push(links.clone().into_iter());
+                                            let _ = store.put(cid, blk.data(), links);
+                                        }
+                                    };
+                                }
                             }
                         }
-                    }
-                    info!("completed transfer in {}ms", start.elapsed().as_millis());
+                        info!("completed transfer in {}ms", start.elapsed().as_millis());
 
-                    let _ = session.stop().await;
-                    let _ = sender.send(Ok(()));
-                });
+                        let _ = session.stop().await;
+                        let _ = sender.send(Ok(()));
+                    });
+                };
+
+                if let Some(tork) = behaviour.tork {
+                    let session = match behaviour.tork.new_session() {
+                        Ok(session) => session,
+                        Err(err) => {
+                            sender.send(Err(err)).ok();
+                            return;
+                        }
+                    };
+
+                    tokio::task::spawn(async move {
+                        let start = Instant::now();
+
+                        let stream = session.resolve_all(root).await;
+
+                        if let Err(err) = stream.try_collect::<Vec<_>>().await {
+                            sender.send(Err(err)).ok();
+                        } else {
+                            sender.send(Ok(())).ok();
+                        }
+                        info!("completed transfer in {}ms", start.elapsed().as_millis());
+
+                        session.stop();
+                    });
+                }
             }
         }
     }

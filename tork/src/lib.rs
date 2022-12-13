@@ -1,11 +1,7 @@
 use anyhow::Result;
-use async_stream::try_stream;
 use asynchronous_codec::Framed;
 use futures::prelude::*;
-use futures::stream::FuturesUnordered;
-use libipld::codec::Codec;
-use libipld::codec_impl::IpldCodec;
-use libipld::{Cid, Ipld};
+use libipld::Ipld;
 use libp2p::core::{
     connection::{ConnectedPoint, ConnectionId},
     InboundUpgrade, OutboundUpgrade,
@@ -19,41 +15,21 @@ use libp2p::{Multiaddr, PeerId};
 use smallvec::SmallVec;
 use std::time::{Duration, Instant};
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::HashMap,
     io,
     pin::Pin,
     sync::{Arc, Mutex},
     task::{Context, Poll},
 };
-use tokio::sync::oneshot;
-use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::info;
 
 mod prefix;
 mod protocol;
+mod session;
 
-use self::prefix::Prefix;
 pub use self::protocol::{tests::*, Store};
 use self::protocol::{Block, Message, TorkCodec, TorkProtocol};
-
-type ResponseSender = oneshot::Sender<Result<Message>>;
-
-type NetworkSender = async_channel::Sender<NetEvent>;
-
-#[derive(Debug)]
-pub enum NetEvent {
-    SendMessage {
-        peer: PeerId,
-        message: Message,
-        connection_id: ConnectionId,
-    },
-    SendRequest {
-        peer: PeerId,
-        message: Message,
-        connection_id: ConnectionId,
-        response: ResponseSender,
-    },
-}
+use self::session::{NetEvent, NetworkSender, ResponseSender, Session};
 
 enum ConnState {
     Connected(ConnectionId),
@@ -67,121 +43,6 @@ pub struct Tork<S: Store> {
     conns: Arc<Mutex<HashMap<PeerId, ConnectionId>>>,
     network_receiver: async_channel::Receiver<NetEvent>,
     network_sender: NetworkSender,
-}
-
-type BlockSender = oneshot::Sender<Result<(Ipld, Vec<Cid>)>>;
-
-pub struct Task {
-    cid: Cid,
-    result: BlockSender,
-}
-
-#[derive(Debug)]
-pub struct Session<S: Store> {
-    store: S,
-    links: deque::Worker<Task>,
-    _workers: Arc<Vec<JoinHandle<()>>>,
-}
-
-impl<S: Store> Session<S> {
-    pub fn new<'a, P>(store: S, net: NetworkSender, providers: P) -> Self
-    where
-        P: Iterator<Item = (&'a PeerId, &'a ConnectionId)>,
-    {
-        let (w, s) = deque::new::<Task>();
-        let mut workers = Vec::new();
-        for (p, c) in providers {
-            let network_sender = net.clone();
-            let peer = *p;
-            let conn_id = *c;
-            let stealer = s.clone();
-            let store = store.clone();
-
-            // TODO: workers should keep track of peer connectivity, stats etc.
-            workers.push(tokio::task::spawn(async move {
-                loop {
-                    match stealer.steal() {
-                        deque::Data(task) => {
-                            let (s, r) = oneshot::channel();
-                            let _ = network_sender
-                                .send(NetEvent::SendRequest {
-                                    peer,
-                                    message: task.cid.into(),
-                                    connection_id: conn_id,
-                                    response: s,
-                                })
-                                .await;
-
-                            match r.await {
-                                Ok(Ok(res)) => {
-                                    let result = res
-                                        .response
-                                        .as_ref()
-                                        .and_then(|res| res.blocks.iter().next())
-                                        .ok_or_else(|| anyhow::format_err!("bad response message"))
-                                        .and_then(|blk| {
-                                            let cid = Prefix::new_from_bytes(&blk.prefix)?
-                                                .to_cid(&blk.data)?;
-                                            let codec = IpldCodec::try_from(cid.codec())?;
-                                            let node: Ipld = codec.decode(&blk.data)?;
-
-                                            let mut linkset = BTreeSet::new();
-                                            node.references(&mut linkset);
-                                            let links = linkset.into_iter().collect::<Vec<Cid>>();
-
-                                            store.put(cid, &blk.data, links.clone())?;
-                                            Ok((node, links))
-                                        });
-                                    if let Err(err) = task.result.send(result) {
-                                        warn!("task result sender: {:?}", err);
-                                    }
-                                }
-                                Ok(Err(other)) => {
-                                    warn!("send:{}: failed: {:?}", peer, other);
-                                }
-                                _ => {}
-                            };
-                        }
-                        deque::Empty => {
-                            tokio::task::yield_now().await;
-                        }
-                        deque::Abort => break,
-                    }
-                }
-            }));
-        }
-        Session {
-            store,
-            links: w,
-            _workers: Arc::new(workers),
-        }
-    }
-
-    pub async fn resolve_all(&self, root: Cid) -> impl Stream<Item = Result<Ipld>> + '_ {
-        let mut jobs = FuturesUnordered::new();
-        jobs.push(self.load_link(root));
-
-        try_stream! {
-
-            while let Some(Ok((node, links))) = jobs.next().await {
-
-                for l in links.into_iter() {
-                    jobs.push(self.load_link(l));
-                }
-
-                yield node;
-            }
-        }
-    }
-
-    pub async fn load_link(&self, cid: Cid) -> Result<(Ipld, Vec<Cid>)> {
-        let (s, r) = oneshot::channel();
-        self.links.push(Task { cid, result: s });
-        match r.await {
-            Ok(res) => res,
-            _ => Err(anyhow::format_err!("sender was dropped")),
-        }
-    }
 }
 
 impl<S: Store> Tork<S> {
@@ -277,18 +138,19 @@ impl<S: Store> NetworkBehaviour for Tork<S> {
                 let store = self.store.clone();
                 let sender = self.network_sender.clone();
                 async move {
-                    if let Ok(bytes) = store.get(&req.root) {
+                    let msg = if let Ok(bytes) = store.get(&req.root) {
                         let blk = Block::new(req.root, bytes);
-                        let msg = Message::complete_response(vec![blk]);
-
-                        let _ = sender
-                            .send(NetEvent::SendMessage {
-                                peer,
-                                message: msg,
-                                connection_id,
-                            })
-                            .await;
-                    }
+                        Message::complete_response(vec![blk])
+                    } else {
+                        Message::not_found()
+                    };
+                    let _ = sender
+                        .send(NetEvent::SendMessage {
+                            peer,
+                            message: msg,
+                            connection_id,
+                        })
+                        .await;
                 }
             });
         }
@@ -412,6 +274,7 @@ impl ConnectionHandler for TorkHandler {
         protocol: <Self::OutboundProtocol as OutboundUpgrade<NegotiatedSubstream>>::Output,
         message: Self::OutboundOpenInfo,
     ) {
+        info!("negociated outbound");
         self.substream = Some(SubstreamState::PendingSendWithResponse(protocol, message));
     }
 
@@ -447,6 +310,7 @@ impl ConnectionHandler for TorkHandler {
             self.outbound_substream_establishing = true;
 
             if let HandlerInEvent::Request(msg, sender) = message {
+                info!("sending outbound request");
                 return Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest {
                     protocol: self.listen_protocol.clone().map_info(|()| (msg, sender)),
                 });
@@ -659,6 +523,14 @@ mod tests {
     use tracing_subscriber::{filter::LevelFilter, fmt, prelude::*};
 
     use super::*;
+
+    fn assert_send<T: Send + Sync>() {}
+
+    #[test]
+    fn test_traits() {
+        assert_send::<Tork<TestStore>>();
+        assert_send::<&Tork<TestStore>>();
+    }
 
     // Get content for a given number of blocks and providers
     async fn get_content<const NB: usize, const NP: usize>() {
