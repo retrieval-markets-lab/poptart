@@ -1,5 +1,5 @@
 use crate::store::RockStore;
-use clap::{Parser, ValueEnum};
+use clap::ValueEnum;
 use iroh_bitswap::{Bitswap, BitswapEvent};
 use libp2p::relay::v2::{
     client::Client as RelayClient, client::Event as RelayClientEvent, relay::Event as RelayEvent,
@@ -15,7 +15,7 @@ use libp2p::{
     relay,
     swarm::{behaviour::toggle::Toggle, NetworkBehaviour},
 };
-use std::str::FromStr;
+use prometheus_client::encoding::text::Encode;
 use tork::Tork;
 
 pub const PROTOCOL_VERSION: &str = "poptart/0.1.0";
@@ -35,7 +35,7 @@ pub struct PopTartBehaviour {
 #[derive(Clone, Debug)]
 pub struct ProtocolParserError(String);
 
-#[derive(Default, Copy, Clone, Debug, ValueEnum)]
+#[derive(Default, Copy, Clone, Debug, ValueEnum, Hash, PartialEq, Eq, Encode)]
 pub enum TransferProtocol {
     #[default]
     Tork,
@@ -112,7 +112,7 @@ impl PopTartBehaviour {
 
 #[derive(Debug)]
 pub enum Event {
-    TorkEvent,
+    Tork,
     RelayClient(RelayClientEvent),
     Relay(RelayEvent),
     Dcutr(DcutrEvent),
@@ -121,8 +121,8 @@ pub enum Event {
 }
 
 impl From<()> for Event {
-    fn from(e: ()) -> Self {
-        Event::TorkEvent
+    fn from(_: ()) -> Self {
+        Event::Tork
     }
 }
 
