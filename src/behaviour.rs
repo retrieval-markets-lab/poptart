@@ -14,6 +14,7 @@ use libp2p::{
     relay,
     swarm::{behaviour::toggle::Toggle, NetworkBehaviour},
 };
+use std::str::FromStr;
 use tork::Tork;
 
 pub const PROTOCOL_VERSION: &str = "poptart/0.1.0";
@@ -30,15 +31,36 @@ pub struct PopTartBehaviour {
     pub bitswap: Toggle<Bitswap<RockStore>>,
 }
 
-enum TransferProtocol {
+#[derive(Clone, Debug)]
+pub struct ProtocolParserError(String);
+
+#[derive(Default, Copy, Clone, Debug)]
+pub enum TransferProtocol {
+    #[default]
     Tork,
     Bitswap,
 }
+impl FromStr for TransferProtocol {
+    type Err = ProtocolParserError;
 
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == "bitswap" {
+            Ok(TransferProtocol::Bitswap)
+        } else if s == "tork" {
+            Ok(TransferProtocol::Tork)
+        } else {
+            Err(ProtocolParserError(
+                "incorrectly formatted protocol string".to_string(),
+            ))
+        }
+    }
+}
+
+#[derive(Default, Clone, Copy)]
 pub struct PopTartConfig {
-    is_relay: bool,
-    is_relay_client: bool,
-    transfer_protocol: TransferProtocol,
+    pub is_relay: bool,
+    pub is_relay_client: bool,
+    pub transfer_protocol: TransferProtocol,
 }
 
 unsafe impl Send for PopTartBehaviour {}

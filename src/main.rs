@@ -20,10 +20,9 @@ use libp2p::{
 };
 use log::{debug, info, warn};
 use smallvec::SmallVec;
-use std::collections::BTreeSet;
-use std::env;
 use std::path::PathBuf;
 use std::time::Instant;
+use std::{collections::BTreeSet, str::FromStr};
 use std::{env, vec};
 use tokio::fs::File;
 use tokio::io::BufReader;
@@ -67,12 +66,16 @@ async fn main() -> Result<(), anyhow::Error> {
 
     info!("starting poptart 🍭 ...");
     let opt = Opt::parse();
-    let is_relay_client = if let CliArgument::Relay { .. } = opt.argument {
+    let mut config = PopTartConfig::default();
+    config.transfer_protocol = TransferProtocol::from_str(&opt.transfer_protocol)
+        .expect("failed to parse protocol string");
+    if let CliArgument::Relay { .. } = opt.argument {
         info!("you are a hole-punching 🧃 relay. thank you for your service 🫡.");
-        false
-    } else {
+        config.is_relay = true;
+    };
+    if let Some(_) = opt.relay {
         info!("we'll be punching 🧃 through NATs today.");
-        true
+        config.is_relay_client = true;
     };
     let keys = Keypair::generate_ed25519();
     let peer_id = keys.public().to_peer_id();
@@ -91,10 +94,9 @@ async fn main() -> Result<(), anyhow::Error> {
     };
 
     info!("setting up transport 🏎️ ...");
-    let (transport, relay_client) = build_transport(&keys, is_relay_client).await;
+    let (transport, relay_client) = build_transport(&keys, config.is_relay_client).await;
 
-    let behaviour =
-        PopTartBehaviour::new(&keys, store.clone(), is_relay_client, relay_client).await;
+    let behaviour = PopTartBehaviour::new(&keys, store.clone(), config, relay_client).await;
 
     let swarm = Swarm::with_tokio_executor(transport, behaviour, peer_id);
 
@@ -108,13 +110,13 @@ async fn main() -> Result<(), anyhow::Error> {
     let mut client = Client::new(cmd_sender);
 
     match opt.argument {
-        CliArgument::Provide { relay, path, port } => {
+        CliArgument::Provide { path, port } => {
             client
                 .start(format!("/ip4/0.0.0.0/tcp/{:}", port).parse()?)
                 .await
                 .expect("swarm to start listening");
 
-            if let Some(addr) = relay {
+            if let Some(addr) = opt.relay {
                 client.dial(addr).await?;
             }
 
@@ -130,7 +132,9 @@ async fn main() -> Result<(), anyhow::Error> {
                 let blk = Block::new(data, cid);
                 let links = parse_links(&cid, blk.data()).unwrap_or_default();
                 store.put(cid, blk.data(), links)?;
-                client.notify_new_blocks_bitswap(vec![blk]).await?;
+                if let TransferProtocol::Bitswap = config.transfer_protocol {
+                    client.notify_new_blocks_bitswap(vec![blk]).await?;
+                }
             }
             info!("imported car file with root {:?} into store...", root);
 
@@ -174,6 +178,10 @@ async fn main() -> Result<(), anyhow::Error> {
 struct Opt {
     #[clap(long)]
     tempstore: bool,
+    #[clap(long)]
+    relay: Option<Multiaddr>,
+    #[clap(long)]
+    transfer_protocol: String,
     #[clap(subcommand)]
     argument: CliArgument,
 }
@@ -187,8 +195,6 @@ enum CliArgument {
     Provide {
         #[clap(long)]
         path: PathBuf,
-        #[clap(long)]
-        relay: Option<Multiaddr>,
         #[arg(default_value_t = 2001)]
         port: u16,
     },
@@ -363,7 +369,10 @@ impl EventLoop {
                 }
             }
             Event::TorkEvent => {}
-            Event::Bitswap(_) => {}
+            Event::Bitswap(e) => {
+                debug!("bitswap event: {:?}", e);
+                let _ = self.event_sender.send(Event::Bitswap(e));
+            }
         }
     }
 
@@ -393,20 +402,24 @@ impl EventLoop {
                 }
             }
             Command::NotifyNewBlocks { blocks } => {
-                let client = self.swarm.behaviour().bitswap.client().clone();
-                // avoid blocking other events
-                tokio::task::spawn(async move {
-                    if let Err(err) = client.notify_new_blocks(&blocks).await {
-                        warn!("failed to notify bitswap about blocks: {:?}", err);
-                    }
-                });
+                if let Some(bitswap) = self.swarm.behaviour().bitswap.as_ref() {
+                    let client = bitswap.client().clone();
+                    // avoid blocking other events
+                    tokio::task::spawn(async move {
+                        if let Err(err) = client.notify_new_blocks(&blocks).await {
+                            warn!("failed to notify bitswap about blocks: {:?}", err);
+                        }
+                    });
+                } else {
+                    warn!("tried to notify bitswap of new blocks, but bitswap is not enabled.")
+                }
             }
             // Currently all we do here is follow every link we can find and store the blocks.
             Command::Resolve { root, sender } => {
                 let behaviour = self.swarm.behaviour();
                 let store = self.store.clone();
 
-                if let Some(bitswap) = behaviour.bitswap {
+                if let Some(bitswap) = behaviour.bitswap.as_ref() {
                     let client = bitswap.client().clone();
                     tokio::task::spawn(async move {
                         let start = Instant::now();
@@ -438,10 +451,8 @@ impl EventLoop {
                         let _ = session.stop().await;
                         let _ = sender.send(Ok(()));
                     });
-                };
-
-                if let Some(tork) = behaviour.tork {
-                    let session = match behaviour.tork.new_session() {
+                } else if let Some(tork) = behaviour.tork.as_ref() {
+                    let session = match tork.new_session() {
                         Ok(session) => session,
                         Err(err) => {
                             sender.send(Err(err)).ok();

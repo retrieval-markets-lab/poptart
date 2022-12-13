@@ -160,7 +160,7 @@ mod tests {
     };
     use libipld::ipld;
     use std::collections::HashMap;
-    use tracing::{info, trace, Level};
+    use tracing::info;
     // use tracing_subscriber::{filter::LevelFilter, fmt, prelude::*};
 
     fn assert_send<T: Send>() {}

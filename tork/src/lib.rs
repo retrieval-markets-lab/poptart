@@ -332,7 +332,7 @@ impl ConnectionHandler for TorkHandler {
                             self.substream = Some(SubstreamState::WaitingOutput(substream));
                             return Poll::Ready(ConnectionHandlerEvent::Custom(message));
                         }
-                        Poll::Ready(Some(Err(error))) => {
+                        Poll::Ready(Some(Err(_))) => {
                             // More serious errors, close this side of the stream. If the
                             // peer is still around, they will re-establish their connection
                             self.substream = Some(SubstreamState::Closing(substream));
