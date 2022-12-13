@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::thread::available_parallelism;
 use tokio::task;
+use tork::Store as TorkStore;
 
 /// Creates the default rocksdb options
 /// based on Iroh's implementation.
@@ -100,6 +101,26 @@ impl BitswapStore for RockStore {
 
     async fn has(&self, cid: &Cid) -> anyhow::Result<bool> {
         self.has(cid)
+    }
+}
+
+impl TorkStore for RockStore {
+    fn get(&self, cid: &Cid) -> anyhow::Result<Bytes> {
+        let slice = self
+            .read_store()?
+            .get(cid)?
+            .ok_or_else(|| anyhow!("not found"))?;
+        let bytes = BytesMut::from(&slice[..]).freeze();
+        Ok(bytes)
+    }
+
+    fn put<T: AsRef<[u8]>, L: IntoIterator<Item = Cid>>(
+        &self,
+        cid: Cid,
+        bytes: T,
+        links: L,
+    ) -> Result<()> {
+        self.put(cid, bytes, links)
     }
 }
 

@@ -1,4 +1,5 @@
 use ahash::HashMap;
+use bytes::Bytes;
 use cid::Cid;
 use clap::Parser;
 use futures::{
@@ -17,10 +18,10 @@ use libp2p::{
     Multiaddr, PeerId, Swarm,
 };
 use log::{debug, info, warn};
-use smallvec::SmallVec;
 use std::collections::BTreeSet;
+use std::env;
 use std::path::PathBuf;
-use std::{env, vec};
+use std::time::Instant;
 use tokio::fs::File;
 use tokio::io::BufReader;
 
@@ -60,6 +61,7 @@ fn poptart_data_root() -> anyhow::Result<PathBuf> {
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     colog::init();
+
     info!("starting poptart 🍭 ...");
     let opt = Opt::parse();
     let is_relay_client = if let CliArgument::Relay = opt.argument {
@@ -103,32 +105,28 @@ async fn main() -> Result<(), anyhow::Error> {
     let mut client = Client::new(cmd_sender);
 
     client
-        .start("/ip4/0.0.0.0/tcp/2001".parse()?)
+        .start("/ip4/0.0.0.0/tcp/0".parse()?)
         .await
         .expect("swarm to start listening");
 
     match opt.argument {
         CliArgument::Provide { relay, path } => {
-            client.dial(relay).await?;
+            if let Some(relay) = relay {
+                client.dial(relay).await?;
+            }
 
             let file = File::open(&path).await?;
             let buf_reader = BufReader::new(file);
 
             let car_reader = CarReader::new(buf_reader).await?;
             let root = car_reader.header().roots()[0];
-            let stream = car_reader.stream().boxed();
+            let mut stream = car_reader.stream().boxed();
 
-            let store_clone = store.clone();
-            stream
-                .try_for_each(move |(cid, data)| {
-                    let store = store_clone.clone();
-                    async move {
-                        let links = parse_links(&cid, &data).unwrap_or_default();
-                        store.put(cid, &data, links)?;
-                        Ok(())
-                    }
-                })
-                .await?;
+            while let Some(Ok((cid, data))) = stream.next().await {
+                let data = Bytes::from(data);
+                let links = parse_links(&cid, &data).unwrap_or_default();
+                store.put(cid, data, links)?;
+            }
             info!("imported car file with root {:?} into store...", root);
 
             loop {
@@ -142,6 +140,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 client.dial(peer).await?;
             }
             client.resolve(root).await?;
+            info!("resolved content");
         }
         CliArgument::Relay => loop {
             match evt_receiver.next().await {
@@ -169,7 +168,7 @@ enum CliArgument {
         #[clap(long)]
         path: PathBuf,
         #[clap(long)]
-        relay: Multiaddr,
+        relay: Option<Multiaddr>,
     },
     Resolve {
         #[clap(long)]
@@ -266,7 +265,7 @@ impl EventLoop {
             tokio::select! {
                 event = self.swarm.select_next_some() => self.handle_swarm_event(event),
                 command = self.command_receiver.next() => match command {
-                    Some(c) => self.handle_command(c).await,
+                    Some(c) => self.handle_command(c),
                     None => return,
                 },
             }
@@ -322,23 +321,16 @@ impl EventLoop {
                 } = e
                 {
                     info!("peer told us our public address: {:?}", observed_addr);
-                    self.swarm
-                        .behaviour()
-                        .bitswap
-                        .on_identify(&peer_id, &protocols);
                     self.dial_requests
                         .remove(&peer_id)
                         .and_then(|sender| sender.send(Ok(())).ok());
                 }
             }
-            Event::Bitswap(e) => {
-                debug!("bitswap event: {:?}", e);
-                let _ = self.event_sender.send(Event::Bitswap(e));
-            }
+            Event::TorkEvent => {}
         }
     }
 
-    async fn handle_command(&mut self, command: Command) {
+    fn handle_command(&mut self, command: Command) {
         match command {
             Command::Start { addr, sender } => {
                 let _ = match self.swarm.listen_on(addr) {
@@ -367,30 +359,28 @@ impl EventLoop {
             Command::Resolve { root, sender } => {
                 let behaviour = self.swarm.behaviour();
 
-                let session = behaviour.bitswap.client().new_session().await;
-
-                let mut stack: SmallVec<[vec::IntoIter<Cid>; 8]> = SmallVec::new();
-                stack.push(vec![root].into_iter());
-
-                while !stack.is_empty() {
-                    let next = stack.last_mut().expect("stack should be non-empty").next();
-
-                    match next {
-                        None => {
-                            stack.pop();
-                        }
-                        Some(cid) => {
-                            if let Ok(blk) = session.get_block(&cid).await {
-                                if let Ok(links) = parse_links(blk.cid(), blk.data()) {
-                                    stack.push(links.clone().into_iter());
-                                    let _ = self.store.put(cid, blk.data(), links);
-                                }
-                            };
-                        }
+                let session = match behaviour.tork.new_session() {
+                    Ok(session) => session,
+                    Err(err) => {
+                        sender.send(Err(err)).ok();
+                        return;
                     }
-                }
-                let _ = session.stop().await;
-                let _ = sender.send(Ok(()));
+                };
+
+                tokio::task::spawn(async move {
+                    let start = Instant::now();
+
+                    let stream = session.resolve_all(root).await;
+
+                    if let Err(err) = stream.try_collect::<Vec<_>>().await {
+                        sender.send(Err(err)).ok();
+                    } else {
+                        sender.send(Ok(())).ok();
+                    }
+                    info!("completed transfer in {}ms", start.elapsed().as_millis());
+
+                    session.stop();
+                });
             }
         }
     }

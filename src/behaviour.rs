@@ -1,5 +1,4 @@
 use crate::store::RockStore;
-use iroh_bitswap::{Bitswap, BitswapEvent, Config as BitswapConfig};
 use libp2p::relay::v2::{
     client::Client as RelayClient, client::Event as RelayClientEvent, relay::Event as RelayEvent,
     relay::Relay,
@@ -14,6 +13,7 @@ use libp2p::{
     relay,
     swarm::{behaviour::toggle::Toggle, NetworkBehaviour},
 };
+use tork::Tork;
 
 pub const PROTOCOL_VERSION: &str = "poptart/0.1.0";
 pub const AGENT_VERSION: &str = concat!("poptart/", env!("CARGO_PKG_VERSION"));
@@ -25,7 +25,7 @@ pub struct PopTartBehaviour {
     relay: Toggle<Relay>,
     identify: Identify,
     dcutr: Toggle<Dcutr>,
-    pub bitswap: Bitswap<RockStore>,
+    pub tork: Tork<RockStore>,
 }
 
 unsafe impl Send for PopTartBehaviour {}
@@ -69,23 +69,23 @@ impl PopTartBehaviour {
             identify,
             relay_client: relay_client.into(),
             relay,
-            bitswap: Bitswap::new(peer_id, store.clone(), BitswapConfig::default()).await,
+            tork: Tork::new(peer_id, store.clone()),
         }
     }
 }
 
 #[derive(Debug)]
 pub enum Event {
-    Bitswap(BitswapEvent),
+    TorkEvent,
     RelayClient(RelayClientEvent),
     Relay(RelayEvent),
     Dcutr(DcutrEvent),
     Identify(IdentifyEvent),
 }
 
-impl From<BitswapEvent> for Event {
-    fn from(e: BitswapEvent) -> Self {
-        Event::Bitswap(e)
+impl From<()> for Event {
+    fn from(e: ()) -> Self {
+        Event::TorkEvent
     }
 }
 

@@ -3683,6 +3683,9 @@ dependencies = [
  "smallvec",
  "tempfile",
  "tokio",
+ "tork",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
