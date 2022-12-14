@@ -212,7 +212,7 @@ enum CliArgument {
     Resolve {
         #[clap(long)]
         root: Cid,
-        #[clap(long)]
+        #[clap(long, use_value_delimiter = true, value_delimiter = ',')]
         peers: Vec<Multiaddr>,
     },
 }
